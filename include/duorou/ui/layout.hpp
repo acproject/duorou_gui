@@ -1,0 +1,241 @@
+#pragma once
+
+#include <duorou/ui/node.hpp>
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <ostream>
+#include <string>
+#include <variant>
+#include <vector>
+
+namespace duorou::ui {
+
+struct SizeF {
+  float w{};
+  float h{};
+};
+
+struct RectF {
+  float x{};
+  float y{};
+  float w{};
+  float h{};
+};
+
+struct ConstraintsF {
+  float max_w{};
+  float max_h{};
+};
+
+struct LayoutNode {
+  NodeId id{};
+  std::string key;
+  std::string type;
+  RectF frame;
+  std::vector<LayoutNode> children;
+};
+
+inline float clampf(float v, float lo, float hi) {
+  return std::min(std::max(v, lo), hi);
+}
+
+inline const PropValue *find_prop(const Props &props, const std::string &key) {
+  const auto it = props.find(key);
+  if (it == props.end()) {
+    return nullptr;
+  }
+  return &it->second;
+}
+
+inline float prop_as_float(const Props &props, const std::string &key,
+                           float fallback) {
+  const auto *pv = find_prop(props, key);
+  if (!pv) {
+    return fallback;
+  }
+
+  if (const auto *d = std::get_if<double>(pv)) {
+    return static_cast<float>(*d);
+  }
+  if (const auto *i = std::get_if<std::int64_t>(pv)) {
+    return static_cast<float>(*i);
+  }
+  if (const auto *b = std::get_if<bool>(pv)) {
+    return *b ? 1.0f : 0.0f;
+  }
+  return fallback;
+}
+
+inline std::string prop_as_string(const Props &props, const std::string &key,
+                                  std::string fallback = {}) {
+  const auto *pv = find_prop(props, key);
+  if (!pv) {
+    return fallback;
+  }
+  if (const auto *s = std::get_if<std::string>(pv)) {
+    return *s;
+  }
+  return fallback;
+}
+
+inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
+  const auto font_size = prop_as_float(node.props, "font_size", 16.0f);
+  const auto padding = prop_as_float(node.props, "padding", 0.0f);
+  const auto char_w = font_size * 0.5f;
+  const auto line_h = font_size * 1.2f;
+
+  if (node.type == "Text") {
+    const auto text = prop_as_string(node.props, "value", "");
+    const auto w = static_cast<float>(text.size()) * char_w + padding * 2.0f;
+    const auto h = line_h + padding * 2.0f;
+    return SizeF{clampf(w, 0.0f, constraints.max_w),
+                 clampf(h, 0.0f, constraints.max_h)};
+  }
+
+  if (node.type == "Button") {
+    const auto title = prop_as_string(node.props, "title", "");
+    const auto w =
+        static_cast<float>(title.size()) * char_w + 24.0f + padding * 2.0f;
+    const auto h = std::max(28.0f, line_h + 12.0f) + padding * 2.0f;
+    return SizeF{clampf(w, 0.0f, constraints.max_w),
+                 clampf(h, 0.0f, constraints.max_h)};
+  }
+
+  return SizeF{0.0f, 0.0f};
+}
+
+inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
+  const auto padding = prop_as_float(node.props, "padding", 0.0f);
+  const auto spacing = prop_as_float(node.props, "spacing", 0.0f);
+  const auto inner_max_w = std::max(0.0f, constraints.max_w - padding * 2.0f);
+  const auto inner_max_h = std::max(0.0f, constraints.max_h - padding * 2.0f);
+  const auto inner = ConstraintsF{inner_max_w, inner_max_h};
+
+  if (node.type == "Column") {
+    float w = 0.0f;
+    float h = 0.0f;
+    for (std::size_t i = 0; i < node.children.size(); ++i) {
+      const auto cs = measure_node(node.children[i], inner);
+      w = std::max(w, cs.w);
+      h += cs.h;
+      if (i + 1 < node.children.size()) {
+        h += spacing;
+      }
+    }
+    w += padding * 2.0f;
+    h += padding * 2.0f;
+    return SizeF{clampf(w, 0.0f, constraints.max_w),
+                 clampf(h, 0.0f, constraints.max_h)};
+  }
+
+  if (node.type == "Row") {
+    float w = 0.0f;
+    float h = 0.0f;
+    for (std::size_t i = 0; i < node.children.size(); ++i) {
+      const auto cs = measure_node(node.children[i], inner);
+      w += cs.w;
+      h = std::max(h, cs.h);
+      if (i + 1 < node.children.size()) {
+        w += spacing;
+      }
+    }
+    w += padding * 2.0f;
+    h += padding * 2.0f;
+    return SizeF{clampf(w, 0.0f, constraints.max_w),
+                 clampf(h, 0.0f, constraints.max_h)};
+  }
+
+  if (!node.children.empty()) {
+    float w = 0.0f;
+    float h = 0.0f;
+    for (const auto &c : node.children) {
+      const auto cs = measure_node(c, inner);
+      w = std::max(w, cs.w);
+      h = std::max(h, cs.h);
+    }
+    w += padding * 2.0f;
+    h += padding * 2.0f;
+    return SizeF{clampf(w, 0.0f, constraints.max_w),
+                 clampf(h, 0.0f, constraints.max_h)};
+  }
+
+  return measure_leaf(node, constraints);
+}
+
+inline LayoutNode layout_node(const ViewNode &node, RectF frame) {
+  LayoutNode out;
+  out.id = node.id;
+  out.key = node.key;
+  out.type = node.type;
+  out.frame = frame;
+
+  const auto padding = prop_as_float(node.props, "padding", 0.0f);
+  const auto spacing = prop_as_float(node.props, "spacing", 0.0f);
+
+  const auto inner_x = frame.x + padding;
+  const auto inner_y = frame.y + padding;
+  const auto inner_w = std::max(0.0f, frame.w - padding * 2.0f);
+  const auto inner_h = std::max(0.0f, frame.h - padding * 2.0f);
+  const auto inner = ConstraintsF{inner_w, inner_h};
+
+  if (node.type == "Column") {
+    float cursor_y = inner_y;
+    for (std::size_t i = 0; i < node.children.size(); ++i) {
+      const auto cs = measure_node(node.children[i], inner);
+      RectF child_frame{inner_x, cursor_y, inner_w, cs.h};
+      out.children.push_back(layout_node(node.children[i], child_frame));
+      cursor_y += cs.h;
+      if (i + 1 < node.children.size()) {
+        cursor_y += spacing;
+      }
+    }
+    return out;
+  }
+
+  if (node.type == "Row") {
+    float cursor_x = inner_x;
+    for (std::size_t i = 0; i < node.children.size(); ++i) {
+      const auto cs = measure_node(node.children[i], inner);
+      RectF child_frame{cursor_x, inner_y, cs.w, inner_h};
+      out.children.push_back(layout_node(node.children[i], child_frame));
+      cursor_x += cs.w;
+      if (i + 1 < node.children.size()) {
+        cursor_x += spacing;
+      }
+    }
+    return out;
+  }
+
+  if (!node.children.empty()) {
+    for (const auto &c : node.children) {
+      const auto cs = measure_node(c, inner);
+      RectF child_frame{inner_x, inner_y, cs.w, cs.h};
+      out.children.push_back(layout_node(c, child_frame));
+    }
+  }
+
+  return out;
+}
+
+inline LayoutNode layout_tree(const ViewNode &root, SizeF viewport) {
+  RectF root_frame{0.0f, 0.0f, viewport.w, viewport.h};
+  return layout_node(root, root_frame);
+}
+
+inline void dump_layout(std::ostream &os, const LayoutNode &node,
+                        int indent_spaces = 0) {
+  for (int i = 0; i < indent_spaces; ++i) {
+    os.put(' ');
+  }
+
+  os << node.type << "#" << node.id << " [" << node.frame.x << ","
+     << node.frame.y << " " << node.frame.w << "x" << node.frame.h << "]\n";
+
+  for (const auto &c : node.children) {
+    dump_layout(os, c, indent_spaces + 2);
+  }
+}
+
+} // namespace duorou::ui

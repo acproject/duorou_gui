@@ -16,7 +16,7 @@ cmake-build-*/
 *.exe
 *.out
 *.app
-duorou
+
 
 # CMake
 CMakeCache.txt
