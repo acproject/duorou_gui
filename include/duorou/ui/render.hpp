@@ -32,9 +32,31 @@ struct DrawText {
   RectF rect;
   std::string text;
   ColorU8 color;
+  float font_px{16.0f};
 };
 
 using RenderOp = std::variant<DrawRect, DrawText>;
+
+struct Renderer {
+  virtual ~Renderer() = default;
+  virtual void draw_rect(const DrawRect &r) = 0;
+  virtual void draw_text(const DrawText &t) = 0;
+};
+
+inline void render_with(Renderer &renderer, const std::vector<RenderOp> &ops) {
+  for (const auto &op : ops) {
+    std::visit(
+        [&](const auto &v) {
+          using T = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<T, DrawRect>) {
+            renderer.draw_rect(v);
+          } else if constexpr (std::is_same_v<T, DrawText>) {
+            renderer.draw_text(v);
+          }
+        },
+        op);
+  }
+}
 
 inline bool prop_as_bool(const Props &props, const std::string &key,
                          bool fallback) {
@@ -61,10 +83,14 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
     out.push_back(DrawRect{l.frame, pressed ? ColorU8{120, 120, 120, 255}
                                             : ColorU8{80, 80, 80, 255}});
     const auto title = prop_as_string(v.props, "title", "");
-    out.push_back(DrawText{l.frame, title, ColorU8{255, 255, 255, 255}});
+    const auto font_px = prop_as_float(v.props, "font_size", 16.0f);
+    out.push_back(
+        DrawText{l.frame, title, ColorU8{255, 255, 255, 255}, font_px});
   } else if (v.type == "Text") {
     const auto text = prop_as_string(v.props, "value", "");
-    out.push_back(DrawText{l.frame, text, ColorU8{255, 255, 255, 255}});
+    const auto font_px = prop_as_float(v.props, "font_size", 16.0f);
+    out.push_back(
+        DrawText{l.frame, text, ColorU8{255, 255, 255, 255}, font_px});
   }
 
   const auto n = std::min(v.children.size(), l.children.size());

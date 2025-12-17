@@ -86,12 +86,24 @@ inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
   const auto char_w = font_size * 0.5f;
   const auto line_h = font_size * 1.2f;
 
+  auto apply_explicit_size = [&](SizeF s) {
+    if (find_prop(node.props, "width")) {
+      const auto w = prop_as_float(node.props, "width", s.w);
+      s.w = clampf(w, 0.0f, constraints.max_w);
+    }
+    if (find_prop(node.props, "height")) {
+      const auto h = prop_as_float(node.props, "height", s.h);
+      s.h = clampf(h, 0.0f, constraints.max_h);
+    }
+    return s;
+  };
+
   if (node.type == "Text") {
     const auto text = prop_as_string(node.props, "value", "");
     const auto w = static_cast<float>(text.size()) * char_w + padding * 2.0f;
     const auto h = line_h + padding * 2.0f;
-    return SizeF{clampf(w, 0.0f, constraints.max_w),
-                 clampf(h, 0.0f, constraints.max_h)};
+    return apply_explicit_size(SizeF{clampf(w, 0.0f, constraints.max_w),
+                                     clampf(h, 0.0f, constraints.max_h)});
   }
 
   if (node.type == "Button") {
@@ -99,11 +111,11 @@ inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
     const auto w =
         static_cast<float>(title.size()) * char_w + 24.0f + padding * 2.0f;
     const auto h = std::max(28.0f, line_h + 12.0f) + padding * 2.0f;
-    return SizeF{clampf(w, 0.0f, constraints.max_w),
-                 clampf(h, 0.0f, constraints.max_h)};
+    return apply_explicit_size(SizeF{clampf(w, 0.0f, constraints.max_w),
+                                     clampf(h, 0.0f, constraints.max_h)});
   }
 
-  return SizeF{0.0f, 0.0f};
+  return apply_explicit_size(SizeF{0.0f, 0.0f});
 }
 
 inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
@@ -126,8 +138,17 @@ inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
     }
     w += padding * 2.0f;
     h += padding * 2.0f;
-    return SizeF{clampf(w, 0.0f, constraints.max_w),
-                 clampf(h, 0.0f, constraints.max_h)};
+    SizeF s{clampf(w, 0.0f, constraints.max_w),
+            clampf(h, 0.0f, constraints.max_h)};
+    if (find_prop(node.props, "width")) {
+      s.w = clampf(prop_as_float(node.props, "width", s.w), 0.0f,
+                   constraints.max_w);
+    }
+    if (find_prop(node.props, "height")) {
+      s.h = clampf(prop_as_float(node.props, "height", s.h), 0.0f,
+                   constraints.max_h);
+    }
+    return s;
   }
 
   if (node.type == "Row") {
@@ -143,8 +164,17 @@ inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
     }
     w += padding * 2.0f;
     h += padding * 2.0f;
-    return SizeF{clampf(w, 0.0f, constraints.max_w),
-                 clampf(h, 0.0f, constraints.max_h)};
+    SizeF s{clampf(w, 0.0f, constraints.max_w),
+            clampf(h, 0.0f, constraints.max_h)};
+    if (find_prop(node.props, "width")) {
+      s.w = clampf(prop_as_float(node.props, "width", s.w), 0.0f,
+                   constraints.max_w);
+    }
+    if (find_prop(node.props, "height")) {
+      s.h = clampf(prop_as_float(node.props, "height", s.h), 0.0f,
+                   constraints.max_h);
+    }
+    return s;
   }
 
   if (!node.children.empty()) {
@@ -157,8 +187,17 @@ inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
     }
     w += padding * 2.0f;
     h += padding * 2.0f;
-    return SizeF{clampf(w, 0.0f, constraints.max_w),
-                 clampf(h, 0.0f, constraints.max_h)};
+    SizeF s{clampf(w, 0.0f, constraints.max_w),
+            clampf(h, 0.0f, constraints.max_h)};
+    if (find_prop(node.props, "width")) {
+      s.w = clampf(prop_as_float(node.props, "width", s.w), 0.0f,
+                   constraints.max_w);
+    }
+    if (find_prop(node.props, "height")) {
+      s.h = clampf(prop_as_float(node.props, "height", s.h), 0.0f,
+                   constraints.max_h);
+    }
+    return s;
   }
 
   return measure_leaf(node, constraints);
@@ -180,11 +219,23 @@ inline LayoutNode layout_node(const ViewNode &node, RectF frame) {
   const auto inner_h = std::max(0.0f, frame.h - padding * 2.0f);
   const auto inner = ConstraintsF{inner_w, inner_h};
 
+  const auto cross_align = prop_as_string(node.props, "cross_align", "stretch");
+
   if (node.type == "Column") {
     float cursor_y = inner_y;
     for (std::size_t i = 0; i < node.children.size(); ++i) {
       const auto cs = measure_node(node.children[i], inner);
-      RectF child_frame{inner_x, cursor_y, inner_w, cs.h};
+      float child_w = inner_w;
+      float child_x = inner_x;
+      if (cross_align != "stretch") {
+        child_w = cs.w;
+        if (cross_align == "center") {
+          child_x = inner_x + (inner_w - child_w) * 0.5f;
+        } else if (cross_align == "end") {
+          child_x = inner_x + (inner_w - child_w);
+        }
+      }
+      RectF child_frame{child_x, cursor_y, child_w, cs.h};
       out.children.push_back(layout_node(node.children[i], child_frame));
       cursor_y += cs.h;
       if (i + 1 < node.children.size()) {
@@ -198,7 +249,17 @@ inline LayoutNode layout_node(const ViewNode &node, RectF frame) {
     float cursor_x = inner_x;
     for (std::size_t i = 0; i < node.children.size(); ++i) {
       const auto cs = measure_node(node.children[i], inner);
-      RectF child_frame{cursor_x, inner_y, cs.w, inner_h};
+      float child_h = inner_h;
+      float child_y = inner_y;
+      if (cross_align != "stretch") {
+        child_h = cs.h;
+        if (cross_align == "center") {
+          child_y = inner_y + (inner_h - child_h) * 0.5f;
+        } else if (cross_align == "end") {
+          child_y = inner_y + (inner_h - child_h);
+        }
+      }
+      RectF child_frame{cursor_x, child_y, cs.w, child_h};
       out.children.push_back(layout_node(node.children[i], child_frame));
       cursor_x += cs.w;
       if (i + 1 < node.children.size()) {

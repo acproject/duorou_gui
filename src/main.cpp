@@ -10,25 +10,31 @@ int main() {
   auto pressed = state<bool>(false);
 
   ViewInstance app{[&]() {
-    return Column({
-        view("Text")
-            .prop("value", std::string{"Count: "} + std::to_string(count.get()))
-            .build(),
-        view("Button")
-            .key("inc")
-            .prop("title", "Inc")
-            .prop("pressed", pressed.get())
-            .event("pointer_down", on_pointer_down([&]() {
-                     pressed.set(true);
-                     capture_pointer();
-                   }))
-            .event("pointer_up", on_pointer_up([&]() {
-                     pressed.set(false);
-                     release_pointer();
-                     count.set(count.get() + 1);
-                   }))
-            .build(),
-    });
+    return view("Column")
+        .prop("padding", 24)
+        .prop("spacing", 12)
+        .prop("cross_align", "start")
+        .children({
+            view("Text")
+                .prop("value",
+                      std::string{"Count: "} + std::to_string(count.get()))
+                .build(),
+            view("Button")
+                .key("inc")
+                .prop("title", "Inc")
+                .prop("pressed", pressed.get())
+                .event("pointer_down", on_pointer_down([&]() {
+                         pressed.set(true);
+                         capture_pointer();
+                       }))
+                .event("pointer_up", on_pointer_up([&]() {
+                         pressed.set(false);
+                         release_pointer();
+                         count.set(count.get() + 1);
+                       }))
+                .build(),
+        })
+        .build();
   }};
 
   app.set_viewport(SizeF{320.0f, 240.0f});

@@ -299,111 +299,126 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
   };
   std::vector<TextBatch> textBatches;
 
-  const auto &ops = self.instance->render_ops();
-  for (const auto &op : ops) {
-    std::visit(
-        [&](const auto &v) {
-          using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, DrawRect>) {
-            float x = v.rect.x;
-            float y = v.rect.y;
-            float w = v.rect.w;
-            float h = v.rect.h;
+  struct MetalOpRenderer final : Renderer {
+    DuorouMetalView *owner{};
+    MTKView *mtkView{};
+    float vw{};
+    float vh{};
+    std::vector<VertexColor> *colorVertices{};
+    std::vector<TextBatch> *textBatches{};
 
-            float x0 = (x / vw) * 2.0f - 1.0f;
-            float y0 = 1.0f - (y / vh) * 2.0f;
-            float x1 = ((x + w) / vw) * 2.0f - 1.0f;
-            float y1 = 1.0f - ((y + h) / vh) * 2.0f;
+    void draw_rect(const DrawRect &v) override {
+      float x = v.rect.x;
+      float y = v.rect.y;
+      float w = v.rect.w;
+      float h = v.rect.h;
 
-            float r = v.fill.r / 255.0f;
-            float g = v.fill.g / 255.0f;
-            float b = v.fill.b / 255.0f;
-            float a = v.fill.a / 255.0f;
+      float x0 = (x / vw) * 2.0f - 1.0f;
+      float y0 = 1.0f - (y / vh) * 2.0f;
+      float x1 = ((x + w) / vw) * 2.0f - 1.0f;
+      float y1 = 1.0f - ((y + h) / vh) * 2.0f;
 
-            VertexColor v0{x0, y0, 0.0f, 0.0f, r, g, b, a};
-            VertexColor v1{x1, y0, 0.0f, 0.0f, r, g, b, a};
-            VertexColor v2{x0, y1, 0.0f, 0.0f, r, g, b, a};
-            VertexColor v3{x1, y1, 0.0f, 0.0f, r, g, b, a};
+      float r = v.fill.r / 255.0f;
+      float g = v.fill.g / 255.0f;
+      float b = v.fill.b / 255.0f;
+      float a = v.fill.a / 255.0f;
 
-            colorVertices.push_back(v0);
-            colorVertices.push_back(v1);
-            colorVertices.push_back(v2);
-            colorVertices.push_back(v2);
-            colorVertices.push_back(v1);
-            colorVertices.push_back(v3);
-          } else if constexpr (std::is_same_v<T, DrawText>) {
-            if (v.text.empty()) {
-              return;
-            }
+      VertexColor v0{x0, y0, 0.0f, 0.0f, r, g, b, a};
+      VertexColor v1{x1, y0, 0.0f, 0.0f, r, g, b, a};
+      VertexColor v2{x0, y1, 0.0f, 0.0f, r, g, b, a};
+      VertexColor v3{x1, y1, 0.0f, 0.0f, r, g, b, a};
 
-            NSString *key =
-                [[NSString alloc] initWithBytes:v.text.data()
-                                         length:v.text.size()
-                                       encoding:NSUTF8StringEncoding];
-            if (!key) {
-              return;
-            }
+      colorVertices->push_back(v0);
+      colorVertices->push_back(v1);
+      colorVertices->push_back(v2);
+      colorVertices->push_back(v2);
+      colorVertices->push_back(v1);
+      colorVertices->push_back(v3);
+    }
 
-            NSValue *sizeVal = [self.textSizeCache objectForKey:key];
-            id<MTLTexture> tex = [self.textCache objectForKey:key];
-            CGSize size;
-            if (!tex || !sizeVal) {
-              size = CGSizeZero;
-              tex = duorou_make_text_texture(view.device, key, 16.0, &size);
-              if (!tex || size.width <= 0.0 || size.height <= 0.0) {
-                return;
-              }
-              [self.textCache setObject:tex forKey:key];
-              [self.textSizeCache setObject:[NSValue valueWithSize:size]
-                                     forKey:key];
-            } else {
-              size = [sizeVal sizeValue];
-            }
+    void draw_text(const DrawText &v) override {
+      if (v.text.empty()) {
+        return;
+      }
 
-            float tex_w = static_cast<float>(size.width);
-            float tex_h = static_cast<float>(size.height);
-            if (tex_w <= 0.0f || tex_h <= 0.0f) {
-              return;
-            }
+      NSString *text = [[NSString alloc] initWithBytes:v.text.data()
+                                                length:v.text.size()
+                                              encoding:NSUTF8StringEncoding];
+      if (!text) {
+        return;
+      }
 
-            float target_w = v.rect.w;
-            float target_h = v.rect.h;
-            float scale = std::min(target_w / tex_w, target_h / tex_h);
-            if (scale <= 0.0f) {
-              return;
-            }
+      NSString *cacheKey =
+          [NSString stringWithFormat:@"%.2f:%@", (double)v.font_px, text];
 
-            float draw_w = tex_w * scale;
-            float draw_h = tex_h * scale;
-            float x = v.rect.x + (v.rect.w - draw_w) * 0.5f;
-            float y = v.rect.y + (v.rect.h - draw_h) * 0.5f;
+      NSValue *sizeVal = [owner.textSizeCache objectForKey:cacheKey];
+      id<MTLTexture> tex = [owner.textCache objectForKey:cacheKey];
+      CGSize size;
+      if (!tex || !sizeVal) {
+        size = CGSizeZero;
+        tex = duorou_make_text_texture(mtkView.device, text, v.font_px, &size);
+        if (!tex || size.width <= 0.0 || size.height <= 0.0) {
+          return;
+        }
+        [owner.textCache setObject:tex forKey:cacheKey];
+        [owner.textSizeCache setObject:[NSValue valueWithSize:size]
+                                forKey:cacheKey];
+      } else {
+        size = [sizeVal sizeValue];
+      }
 
-            float x0 = (x / vw) * 2.0f - 1.0f;
-            float y0 = 1.0f - (y / vh) * 2.0f;
-            float x1 = ((x + draw_w) / vw) * 2.0f - 1.0f;
-            float y1 = 1.0f - ((y + draw_h) / vh) * 2.0f;
+      float tex_w = static_cast<float>(size.width);
+      float tex_h = static_cast<float>(size.height);
+      if (tex_w <= 0.0f || tex_h <= 0.0f) {
+        return;
+      }
 
-            float r = v.color.r / 255.0f;
-            float g = v.color.g / 255.0f;
-            float b = v.color.b / 255.0f;
-            float a = v.color.a / 255.0f;
+      float target_w = v.rect.w;
+      float target_h = v.rect.h;
+      float scale = std::min(target_w / tex_w, target_h / tex_h);
+      if (scale <= 0.0f) {
+        return;
+      }
 
-            TextBatch batch;
-            batch.texture = tex;
-            batch.vertices.reserve(6);
+      float draw_w = tex_w * scale;
+      float draw_h = tex_h * scale;
+      float x = v.rect.x + (v.rect.w - draw_w) * 0.5f;
+      float y = v.rect.y + (v.rect.h - draw_h) * 0.5f;
 
-            batch.vertices.push_back(VertexTex{x0, y0, 0.0f, 0.0f, r, g, b, a});
-            batch.vertices.push_back(VertexTex{x1, y0, 1.0f, 0.0f, r, g, b, a});
-            batch.vertices.push_back(VertexTex{x0, y1, 0.0f, 1.0f, r, g, b, a});
-            batch.vertices.push_back(VertexTex{x0, y1, 0.0f, 1.0f, r, g, b, a});
-            batch.vertices.push_back(VertexTex{x1, y0, 1.0f, 0.0f, r, g, b, a});
-            batch.vertices.push_back(VertexTex{x1, y1, 1.0f, 1.0f, r, g, b, a});
+      float x0 = (x / vw) * 2.0f - 1.0f;
+      float y0 = 1.0f - (y / vh) * 2.0f;
+      float x1 = ((x + draw_w) / vw) * 2.0f - 1.0f;
+      float y1 = 1.0f - ((y + draw_h) / vh) * 2.0f;
 
-            textBatches.push_back(std::move(batch));
-          }
-        },
-        op);
-  }
+      float r = v.color.r / 255.0f;
+      float g = v.color.g / 255.0f;
+      float b = v.color.b / 255.0f;
+      float a = v.color.a / 255.0f;
+
+      TextBatch batch;
+      batch.texture = tex;
+      batch.vertices.reserve(6);
+
+      batch.vertices.push_back(VertexTex{x0, y0, 0.0f, 0.0f, r, g, b, a});
+      batch.vertices.push_back(VertexTex{x1, y0, 1.0f, 0.0f, r, g, b, a});
+      batch.vertices.push_back(VertexTex{x0, y1, 0.0f, 1.0f, r, g, b, a});
+      batch.vertices.push_back(VertexTex{x0, y1, 0.0f, 1.0f, r, g, b, a});
+      batch.vertices.push_back(VertexTex{x1, y0, 1.0f, 0.0f, r, g, b, a});
+      batch.vertices.push_back(VertexTex{x1, y1, 1.0f, 1.0f, r, g, b, a});
+
+      textBatches->push_back(std::move(batch));
+    }
+  };
+
+  MetalOpRenderer renderer;
+  renderer.owner = self;
+  renderer.mtkView = view;
+  renderer.vw = vw;
+  renderer.vh = vh;
+  renderer.colorVertices = &colorVertices;
+  renderer.textBatches = &textBatches;
+
+  render_with(renderer, self.instance->render_ops());
 
   id<MTLCommandBuffer> cmd = [self.queue commandBuffer];
   id<MTLRenderCommandEncoder> enc =
@@ -489,25 +504,31 @@ static std::unique_ptr<ViewInstance> make_instance() {
   auto pressed = state<bool>(false);
 
   auto fn = [count, pressed]() {
-    return Column({
-        view("Text")
-            .prop("value", std::string("Count: ") + std::to_string(count.get()))
-            .build(),
-        view("Button")
-            .key("inc")
-            .prop("title", "Inc")
-            .prop("pressed", pressed.get())
-            .event("pointer_down", on_pointer_down([pressed]() mutable {
-                     pressed.set(true);
-                     capture_pointer();
-                   }))
-            .event("pointer_up", on_pointer_up([count, pressed]() mutable {
-                     pressed.set(false);
-                     release_pointer();
-                     count.set(count.get() + 1);
-                   }))
-            .build(),
-    });
+    return view("Column")
+        .prop("padding", 24)
+        .prop("spacing", 12)
+        .prop("cross_align", "start")
+        .children({
+            view("Text")
+                .prop("value",
+                      std::string("Count: ") + std::to_string(count.get()))
+                .build(),
+            view("Button")
+                .key("inc")
+                .prop("title", "Inc")
+                .prop("pressed", pressed.get())
+                .event("pointer_down", on_pointer_down([pressed]() mutable {
+                         pressed.set(true);
+                         capture_pointer();
+                       }))
+                .event("pointer_up", on_pointer_up([count, pressed]() mutable {
+                         pressed.set(false);
+                         release_pointer();
+                         count.set(count.get() + 1);
+                       }))
+                .build(),
+        })
+        .build();
   };
 
   return std::make_unique<ViewInstance>(std::move(fn));
