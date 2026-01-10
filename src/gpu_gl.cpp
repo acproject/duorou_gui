@@ -6,8 +6,13 @@ int main() { return 0; }
 
 #include <GLFW/glfw3.h>
 
+#if !defined(GL_CLAMP_TO_EDGE)
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -25,19 +30,279 @@ int main() { return 0; }
 
 using namespace duorou::ui;
 
-static void gl_set_ortho(int w, int h) {
-  glViewport(0, 0, w, h);
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  glOrtho(0.0, static_cast<double>(w), static_cast<double>(h), 0.0, -1.0, 1.0);
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
+#if defined(_WIN32)
+#define DUOROU_GL_APIENTRY __stdcall
+#else
+#define DUOROU_GL_APIENTRY
+#endif
+
+#if !defined(GL_ARRAY_BUFFER)
+#define GL_ARRAY_BUFFER 0x8892
+#endif
+#if !defined(GL_STREAM_DRAW)
+#define GL_STREAM_DRAW 0x88E0
+#endif
+#if !defined(GL_FRAGMENT_SHADER)
+#define GL_FRAGMENT_SHADER 0x8B30
+#endif
+#if !defined(GL_VERTEX_SHADER)
+#define GL_VERTEX_SHADER 0x8B31
+#endif
+#if !defined(GL_COMPILE_STATUS)
+#define GL_COMPILE_STATUS 0x8B81
+#endif
+#if !defined(GL_LINK_STATUS)
+#define GL_LINK_STATUS 0x8B82
+#endif
+#if !defined(GL_INFO_LOG_LENGTH)
+#define GL_INFO_LOG_LENGTH 0x8B84
+#endif
+#if !defined(GL_TEXTURE0)
+#define GL_TEXTURE0 0x84C0
+#endif
+#if !defined(GL_TEXTURE_WRAP_S)
+#define GL_TEXTURE_WRAP_S 0x2802
+#endif
+#if !defined(GL_TEXTURE_WRAP_T)
+#define GL_TEXTURE_WRAP_T 0x2803
+#endif
+#if !defined(GL_TEXTURE_MIN_FILTER)
+#define GL_TEXTURE_MIN_FILTER 0x2801
+#endif
+#if !defined(GL_TEXTURE_MAG_FILTER)
+#define GL_TEXTURE_MAG_FILTER 0x2800
+#endif
+#if !defined(GL_ACTIVE_TEXTURE)
+#define GL_ACTIVE_TEXTURE 0x84E0
+#endif
+
+struct GLProcs {
+  using PFNGLGENBUFFERSPROC = void(DUOROU_GL_APIENTRY *)(GLsizei, GLuint *);
+  using PFNGLBINDBUFFERPROC = void(DUOROU_GL_APIENTRY *)(GLenum, GLuint);
+  using PFNGLBUFFERDATAPROC =
+      void(DUOROU_GL_APIENTRY *)(GLenum, std::ptrdiff_t, const void *, GLenum);
+  using PFNGLBUFFERSUBDATAPROC =
+      void(DUOROU_GL_APIENTRY *)(GLenum, std::ptrdiff_t, std::ptrdiff_t,
+                                const void *);
+  using PFNGLDELETEBUFFERSPROC = void(DUOROU_GL_APIENTRY *)(GLsizei,
+                                                           const GLuint *);
+
+  using PFNGLCREATESHADERPROC = GLuint(DUOROU_GL_APIENTRY *)(GLenum);
+  using PFNGLSHADERSOURCEPROC =
+      void(DUOROU_GL_APIENTRY *)(GLuint, GLsizei, const char *const *,
+                                const GLint *);
+  using PFNGLCOMPILESHADERPROC = void(DUOROU_GL_APIENTRY *)(GLuint);
+  using PFNGLGETSHADERIVPROC = void(DUOROU_GL_APIENTRY *)(GLuint, GLenum,
+                                                          GLint *);
+  using PFNGLGETSHADERINFOLOGPROC =
+      void(DUOROU_GL_APIENTRY *)(GLuint, GLsizei, GLsizei *, char *);
+  using PFNGLDELETESHADERPROC = void(DUOROU_GL_APIENTRY *)(GLuint);
+
+  using PFNGLCREATEPROGRAMPROC = GLuint(DUOROU_GL_APIENTRY *)();
+  using PFNGLATTACHSHADERPROC = void(DUOROU_GL_APIENTRY *)(GLuint, GLuint);
+  using PFNGLLINKPROGRAMPROC = void(DUOROU_GL_APIENTRY *)(GLuint);
+  using PFNGLGETPROGRAMIVPROC = void(DUOROU_GL_APIENTRY *)(GLuint, GLenum,
+                                                           GLint *);
+  using PFNGLGETPROGRAMINFOLOGPROC =
+      void(DUOROU_GL_APIENTRY *)(GLuint, GLsizei, GLsizei *, char *);
+  using PFNGLUSEPROGRAMPROC = void(DUOROU_GL_APIENTRY *)(GLuint);
+  using PFNGLDELETEPROGRAMPROC = void(DUOROU_GL_APIENTRY *)(GLuint);
+
+  using PFNGLGETUNIFORMLOCATIONPROC =
+      GLint(DUOROU_GL_APIENTRY *)(GLuint, const char *);
+  using PFNGLUNIFORMMATRIX4FVPROC =
+      void(DUOROU_GL_APIENTRY *)(GLint, GLsizei, GLboolean, const GLfloat *);
+  using PFNGLUNIFORM1IPROC = void(DUOROU_GL_APIENTRY *)(GLint, GLint);
+
+  using PFNGLGETATTRIBLOCATIONPROC =
+      GLint(DUOROU_GL_APIENTRY *)(GLuint, const char *);
+  using PFNGLENABLEVERTEXATTRIBARRAYPROC =
+      void(DUOROU_GL_APIENTRY *)(GLuint);
+  using PFNGLDISABLEVERTEXATTRIBARRAYPROC =
+      void(DUOROU_GL_APIENTRY *)(GLuint);
+  using PFNGLVERTEXATTRIBPOINTERPROC =
+      void(DUOROU_GL_APIENTRY *)(GLuint, GLint, GLenum, GLboolean, GLsizei,
+                                const void *);
+
+  using PFNGLACTIVETEXTUREPROC = void(DUOROU_GL_APIENTRY *)(GLenum);
+
+  using PFNGLGENVERTEXARRAYSPROC = void(DUOROU_GL_APIENTRY *)(GLsizei, GLuint *);
+  using PFNGLBINDVERTEXARRAYPROC = void(DUOROU_GL_APIENTRY *)(GLuint);
+  using PFNGLDELETEVERTEXARRAYSPROC = void(DUOROU_GL_APIENTRY *)(GLsizei,
+                                                                const GLuint *);
+
+  PFNGLGENBUFFERSPROC GenBuffers{};
+  PFNGLBINDBUFFERPROC BindBuffer{};
+  PFNGLBUFFERDATAPROC BufferData{};
+  PFNGLBUFFERSUBDATAPROC BufferSubData{};
+  PFNGLDELETEBUFFERSPROC DeleteBuffers{};
+
+  PFNGLCREATESHADERPROC CreateShader{};
+  PFNGLSHADERSOURCEPROC ShaderSource{};
+  PFNGLCOMPILESHADERPROC CompileShader{};
+  PFNGLGETSHADERIVPROC GetShaderiv{};
+  PFNGLGETSHADERINFOLOGPROC GetShaderInfoLog{};
+  PFNGLDELETESHADERPROC DeleteShader{};
+
+  PFNGLCREATEPROGRAMPROC CreateProgram{};
+  PFNGLATTACHSHADERPROC AttachShader{};
+  PFNGLLINKPROGRAMPROC LinkProgram{};
+  PFNGLGETPROGRAMIVPROC GetProgramiv{};
+  PFNGLGETPROGRAMINFOLOGPROC GetProgramInfoLog{};
+  PFNGLUSEPROGRAMPROC UseProgram{};
+  PFNGLDELETEPROGRAMPROC DeleteProgram{};
+
+  PFNGLGETUNIFORMLOCATIONPROC GetUniformLocation{};
+  PFNGLUNIFORMMATRIX4FVPROC UniformMatrix4fv{};
+  PFNGLUNIFORM1IPROC Uniform1i{};
+
+  PFNGLGETATTRIBLOCATIONPROC GetAttribLocation{};
+  PFNGLENABLEVERTEXATTRIBARRAYPROC EnableVertexAttribArray{};
+  PFNGLDISABLEVERTEXATTRIBARRAYPROC DisableVertexAttribArray{};
+  PFNGLVERTEXATTRIBPOINTERPROC VertexAttribPointer{};
+
+  PFNGLACTIVETEXTUREPROC ActiveTexture{};
+
+  PFNGLGENVERTEXARRAYSPROC GenVertexArrays{};
+  PFNGLBINDVERTEXARRAYPROC BindVertexArray{};
+  PFNGLDELETEVERTEXARRAYSPROC DeleteVertexArrays{};
+  bool has_vao{};
+};
+
+template <class Fn>
+static bool duorou_gl_load_fn(Fn &out, const char *name) {
+  out = reinterpret_cast<Fn>(glfwGetProcAddress(name));
+  return out != nullptr;
 }
 
-struct GLTextEntry {
+static bool duorou_gl_load(GLProcs &gl) {
+  bool ok = true;
+  ok = ok && duorou_gl_load_fn(gl.GenBuffers, "glGenBuffers");
+  ok = ok && duorou_gl_load_fn(gl.BindBuffer, "glBindBuffer");
+  ok = ok && duorou_gl_load_fn(gl.BufferData, "glBufferData");
+  ok = ok && duorou_gl_load_fn(gl.BufferSubData, "glBufferSubData");
+  ok = ok && duorou_gl_load_fn(gl.DeleteBuffers, "glDeleteBuffers");
+
+  ok = ok && duorou_gl_load_fn(gl.CreateShader, "glCreateShader");
+  ok = ok && duorou_gl_load_fn(gl.ShaderSource, "glShaderSource");
+  ok = ok && duorou_gl_load_fn(gl.CompileShader, "glCompileShader");
+  ok = ok && duorou_gl_load_fn(gl.GetShaderiv, "glGetShaderiv");
+  ok = ok && duorou_gl_load_fn(gl.GetShaderInfoLog, "glGetShaderInfoLog");
+  ok = ok && duorou_gl_load_fn(gl.DeleteShader, "glDeleteShader");
+
+  ok = ok && duorou_gl_load_fn(gl.CreateProgram, "glCreateProgram");
+  ok = ok && duorou_gl_load_fn(gl.AttachShader, "glAttachShader");
+  ok = ok && duorou_gl_load_fn(gl.LinkProgram, "glLinkProgram");
+  ok = ok && duorou_gl_load_fn(gl.GetProgramiv, "glGetProgramiv");
+  ok = ok && duorou_gl_load_fn(gl.GetProgramInfoLog, "glGetProgramInfoLog");
+  ok = ok && duorou_gl_load_fn(gl.UseProgram, "glUseProgram");
+  ok = ok && duorou_gl_load_fn(gl.DeleteProgram, "glDeleteProgram");
+
+  ok = ok && duorou_gl_load_fn(gl.GetUniformLocation, "glGetUniformLocation");
+  ok = ok && duorou_gl_load_fn(gl.UniformMatrix4fv, "glUniformMatrix4fv");
+  ok = ok && duorou_gl_load_fn(gl.Uniform1i, "glUniform1i");
+
+  ok = ok && duorou_gl_load_fn(gl.GetAttribLocation, "glGetAttribLocation");
+  ok = ok &&
+       duorou_gl_load_fn(gl.EnableVertexAttribArray, "glEnableVertexAttribArray");
+  ok = ok && duorou_gl_load_fn(gl.DisableVertexAttribArray,
+                               "glDisableVertexAttribArray");
+  ok = ok && duorou_gl_load_fn(gl.VertexAttribPointer, "glVertexAttribPointer");
+
+  ok = ok && duorou_gl_load_fn(gl.ActiveTexture, "glActiveTexture");
+
+  gl.has_vao = duorou_gl_load_fn(gl.GenVertexArrays, "glGenVertexArrays") &&
+               duorou_gl_load_fn(gl.BindVertexArray, "glBindVertexArray") &&
+               duorou_gl_load_fn(gl.DeleteVertexArrays, "glDeleteVertexArrays");
+
+  return ok;
+}
+
+static void duorou_ortho_px(int w, int h, float out16[16]) {
+  const float l = 0.0f;
+  const float r = static_cast<float>(w);
+  const float t = 0.0f;
+  const float b = static_cast<float>(h);
+
+  const float rl = r - l;
+  const float tb = t - b;
+
+  const float m00 = 2.0f / rl;
+  const float m11 = 2.0f / tb;
+  const float m30 = -(r + l) / rl;
+  const float m31 = -(t + b) / tb;
+
+  out16[0] = m00;
+  out16[1] = 0.0f;
+  out16[2] = 0.0f;
+  out16[3] = 0.0f;
+
+  out16[4] = 0.0f;
+  out16[5] = m11;
+  out16[6] = 0.0f;
+  out16[7] = 0.0f;
+
+  out16[8] = 0.0f;
+  out16[9] = 0.0f;
+  out16[10] = -1.0f;
+  out16[11] = 0.0f;
+
+  out16[12] = m30;
+  out16[13] = m31;
+  out16[14] = 0.0f;
+  out16[15] = 1.0f;
+}
+
+static GLuint duorou_compile_shader(GLProcs &gl, GLenum type,
+                                   const char *src) {
+  const GLuint sh = gl.CreateShader(type);
+  if (sh == 0) {
+    return 0;
+  }
+  gl.ShaderSource(sh, 1, &src, nullptr);
+  gl.CompileShader(sh);
+  GLint ok = 0;
+  gl.GetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+  if (ok) {
+    return sh;
+  }
+  gl.DeleteShader(sh);
+  return 0;
+}
+
+static GLuint duorou_link_program(GLProcs &gl, GLuint vs, GLuint fs) {
+  const GLuint prog = gl.CreateProgram();
+  if (prog == 0) {
+    return 0;
+  }
+  gl.AttachShader(prog, vs);
+  gl.AttachShader(prog, fs);
+  gl.LinkProgram(prog);
+  GLint ok = 0;
+  gl.GetProgramiv(prog, GL_LINK_STATUS, &ok);
+  if (ok) {
+    return prog;
+  }
+  gl.DeleteProgram(prog);
+  return 0;
+}
+
+struct GLTextQuad {
+  float x0{};
+  float y0{};
+  float x1{};
+  float y1{};
+  float u0{};
+  float v0{};
+  float u1{};
+  float v1{};
   GLuint texture{};
+};
+
+struct GLTextEntry {
   int w{};
   int h{};
+  std::vector<GLTextQuad> quads;
 };
 
 static std::string duorou_readable_font_path() {
@@ -151,9 +416,9 @@ public:
   GLTextCache &operator=(const GLTextCache &) = delete;
 
   ~GLTextCache() {
-    for (auto &kv : cache_) {
-      if (kv.second.texture != 0) {
-        glDeleteTextures(1, &kv.second.texture);
+    for (auto &p : pages_) {
+      if (p.texture != 0) {
+        glDeleteTextures(1, &p.texture);
       }
     }
 
@@ -177,7 +442,7 @@ public:
     }
 
     GLTextEntry e{};
-    if (!rasterize_to_texture(text, font_px, e)) {
+    if (!build_entry(text, font_px, e)) {
       return nullptr;
     }
 
@@ -186,6 +451,28 @@ public:
   }
 
 private:
+  struct AtlasPage {
+    GLuint texture{};
+    int w{};
+    int h{};
+    int pen_x{1};
+    int pen_y{1};
+    int row_h{};
+  };
+
+  struct CachedGlyph {
+    GLuint texture{};
+    int advance{};
+    int bitmap_left{};
+    int bitmap_top{};
+    int w{};
+    int h{};
+    float u0{};
+    float v0{};
+    float u1{};
+    float v1{};
+  };
+
   static std::string make_key(std::string_view text, float font_px) {
     const auto scaled = static_cast<int>(std::lround(font_px * 100.0f));
     std::string k;
@@ -196,8 +483,148 @@ private:
     return k;
   }
 
-  bool rasterize_to_texture(std::string_view text, float font_px,
-                            GLTextEntry &out) {
+  static std::uint64_t make_glyph_key(std::uint32_t glyph_index, int px) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(px)) << 32) |
+           static_cast<std::uint64_t>(glyph_index);
+  }
+
+  bool alloc_in_page(AtlasPage &p, int gw, int gh, int &out_x, int &out_y) {
+    if (gw <= 0 || gh <= 0) {
+      out_x = 0;
+      out_y = 0;
+      return true;
+    }
+
+    const int pad = 1;
+    if (p.pen_x + gw + pad > p.w) {
+      p.pen_x = pad;
+      p.pen_y += p.row_h + pad;
+      p.row_h = 0;
+    }
+    if (p.pen_y + gh + pad > p.h) {
+      return false;
+    }
+
+    out_x = p.pen_x;
+    out_y = p.pen_y;
+    p.pen_x += gw + pad;
+    p.row_h = std::max(p.row_h, gh);
+    return true;
+  }
+
+  AtlasPage *ensure_page(int gw, int gh, int &out_x, int &out_y) {
+    for (auto &p : pages_) {
+      if (alloc_in_page(p, gw, gh, out_x, out_y)) {
+        return &p;
+      }
+    }
+
+    AtlasPage p{};
+    p.w = 1024;
+    p.h = 1024;
+    glGenTextures(1, &p.texture);
+    if (p.texture == 0) {
+      return nullptr;
+    }
+
+    glBindTexture(GL_TEXTURE_2D, p.texture);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    std::vector<std::uint8_t> zeros(
+        static_cast<std::size_t>(p.w) * static_cast<std::size_t>(p.h), 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, p.w, p.h, 0, GL_ALPHA,
+                 GL_UNSIGNED_BYTE, zeros.data());
+
+    pages_.push_back(p);
+    if (!alloc_in_page(pages_.back(), gw, gh, out_x, out_y)) {
+      return nullptr;
+    }
+    return &pages_.back();
+  }
+
+  const CachedGlyph *get_glyph(std::uint32_t glyph_index, int px) {
+#if !(defined(DUOROU_HAS_FREETYPE) && DUOROU_HAS_FREETYPE)
+    (void)glyph_index;
+    (void)px;
+    return nullptr;
+#else
+    if (!ensure_face()) {
+      return nullptr;
+    }
+
+    px = std::max(1, px);
+    if (px != last_px_) {
+      if (FT_Set_Pixel_Sizes(face_, 0, static_cast<FT_UInt>(px)) != 0) {
+        return nullptr;
+      }
+      last_px_ = px;
+    }
+
+    const auto key = make_glyph_key(glyph_index, px);
+    if (const auto it = glyphs_.find(key); it != glyphs_.end()) {
+      return &it->second;
+    }
+
+    if (FT_Load_Glyph(face_, static_cast<FT_UInt>(glyph_index),
+                      FT_LOAD_DEFAULT) != 0) {
+      return nullptr;
+    }
+    if (FT_Render_Glyph(face_->glyph, FT_RENDER_MODE_NORMAL) != 0) {
+      return nullptr;
+    }
+
+    const int gw = static_cast<int>(face_->glyph->bitmap.width);
+    const int gh = static_cast<int>(face_->glyph->bitmap.rows);
+
+    int atlas_x = 0;
+    int atlas_y = 0;
+    AtlasPage *page = ensure_page(gw, gh, atlas_x, atlas_y);
+    if (!page) {
+      return nullptr;
+    }
+
+    if (gw > 0 && gh > 0) {
+      std::vector<std::uint8_t> buf(static_cast<std::size_t>(gw) *
+                                        static_cast<std::size_t>(gh),
+                                    0);
+      for (int y = 0; y < gh; ++y) {
+        const auto *src =
+            reinterpret_cast<const std::uint8_t *>(face_->glyph->bitmap.buffer) +
+            static_cast<std::size_t>(y) *
+                static_cast<std::size_t>(face_->glyph->bitmap.pitch);
+        auto *dst = buf.data() + static_cast<std::size_t>(y) *
+                                     static_cast<std::size_t>(gw);
+        std::memcpy(dst, src, static_cast<std::size_t>(gw));
+      }
+
+      glBindTexture(GL_TEXTURE_2D, page->texture);
+      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      glTexSubImage2D(GL_TEXTURE_2D, 0, atlas_x, atlas_y, gw, gh, GL_ALPHA,
+                      GL_UNSIGNED_BYTE, buf.data());
+    }
+
+    CachedGlyph cg{};
+    cg.texture = page->texture;
+    cg.advance = static_cast<int>(face_->glyph->advance.x >> 6);
+    cg.bitmap_left = face_->glyph->bitmap_left;
+    cg.bitmap_top = face_->glyph->bitmap_top;
+    cg.w = gw;
+    cg.h = gh;
+    cg.u0 = page->w > 0 ? static_cast<float>(atlas_x) / page->w : 0.0f;
+    cg.v0 = page->h > 0 ? static_cast<float>(atlas_y) / page->h : 0.0f;
+    cg.u1 = page->w > 0 ? static_cast<float>(atlas_x + gw) / page->w : 0.0f;
+    cg.v1 = page->h > 0 ? static_cast<float>(atlas_y + gh) / page->h : 0.0f;
+
+    auto [it, _] = glyphs_.emplace(key, cg);
+    return &it->second;
+#endif
+  }
+
+  bool build_entry(std::string_view text, float font_px, GLTextEntry &out) {
 #if !(defined(DUOROU_HAS_FREETYPE) && DUOROU_HAS_FREETYPE)
     (void)text;
     (void)font_px;
@@ -208,22 +635,9 @@ private:
       return false;
     }
 
-    const auto px = std::max(1, static_cast<int>(std::lround(font_px)));
-    if (FT_Set_Pixel_Sizes(face_, 0, static_cast<FT_UInt>(px)) != 0) {
-      return false;
-    }
+    const int px = std::max(1, static_cast<int>(std::lround(font_px)));
 
-    struct Glyph {
-      FT_UInt index{};
-      int advance{};
-      int bitmap_left{};
-      int bitmap_top{};
-      int w{};
-      int h{};
-      std::vector<std::uint8_t> buffer;
-    };
-
-    std::vector<Glyph> glyphs;
+    std::vector<CachedGlyph> glyphs;
     glyphs.reserve(text.size());
 
     int pen_x = 0;
@@ -237,38 +651,19 @@ private:
         break;
       }
 
-      const FT_UInt gi = FT_Get_Char_Index(face_, static_cast<FT_ULong>(cp));
-      if (FT_Load_Glyph(face_, gi, FT_LOAD_DEFAULT) != 0) {
+      const auto gi =
+          static_cast<std::uint32_t>(FT_Get_Char_Index(face_, (FT_ULong)cp));
+      const auto *g = get_glyph(gi, px);
+      if (!g) {
         continue;
       }
-      if (FT_Render_Glyph(face_->glyph, FT_RENDER_MODE_NORMAL) != 0) {
-        continue;
-      }
+      glyphs.push_back(*g);
 
-      Glyph g{};
-      g.index = gi;
-      g.advance = static_cast<int>(face_->glyph->advance.x >> 6);
-      g.bitmap_left = face_->glyph->bitmap_left;
-      g.bitmap_top = face_->glyph->bitmap_top;
-      g.w = static_cast<int>(face_->glyph->bitmap.width);
-      g.h = static_cast<int>(face_->glyph->bitmap.rows);
-      g.buffer.resize(static_cast<std::size_t>(g.w) *
-                      static_cast<std::size_t>(g.h));
-      for (int y = 0; y < g.h; ++y) {
-        const std::uint8_t *src =
-            face_->glyph->bitmap.buffer +
-            static_cast<std::size_t>(y) * face_->glyph->bitmap.pitch;
-        std::uint8_t *dst = g.buffer.data() + static_cast<std::size_t>(y) *
-                                                  static_cast<std::size_t>(g.w);
-        std::memcpy(dst, src, static_cast<std::size_t>(g.w));
-      }
-
-      max_top = std::max(max_top, g.bitmap_top);
-      const int bottom = g.h - g.bitmap_top;
+      max_top = std::max(max_top, g->bitmap_top);
+      const int bottom = g->h - g->bitmap_top;
       max_bottom = std::max(max_bottom, bottom);
 
-      glyphs.push_back(std::move(g));
-      pen_x += glyphs.back().advance;
+      pen_x += g->advance;
     }
 
     if (glyphs.empty()) {
@@ -276,58 +671,32 @@ private:
     }
 
     const int pad = 2;
-    const int w = std::max(1, pen_x + pad * 2);
-    const int h = std::max(1, max_top + max_bottom + pad * 2);
+    out.w = std::max(1, pen_x + pad * 2);
+    out.h = std::max(1, max_top + max_bottom + pad * 2);
+    out.quads.clear();
+    out.quads.reserve(glyphs.size());
+
     const int baseline = pad + max_top;
-
-    std::vector<std::uint8_t> pixels(
-        static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
-
     int x = pad;
     for (const auto &g : glyphs) {
       const int dst_x0 = x + g.bitmap_left;
       const int dst_y0 = baseline - g.bitmap_top;
-      for (int yy = 0; yy < g.h; ++yy) {
-        const int dy = dst_y0 + yy;
-        if (dy < 0 || dy >= h) {
-          continue;
-        }
-        for (int xx = 0; xx < g.w; ++xx) {
-          const int dx = dst_x0 + xx;
-          if (dx < 0 || dx >= w) {
-            continue;
-          }
-          const auto src = g.buffer[static_cast<std::size_t>(yy) *
-                                        static_cast<std::size_t>(g.w) +
-                                    static_cast<std::size_t>(xx)];
-          auto &dst = pixels[static_cast<std::size_t>(dy) *
-                                 static_cast<std::size_t>(w) +
-                             static_cast<std::size_t>(dx)];
-          dst = std::max(dst, src);
-        }
+      if (g.w > 0 && g.h > 0) {
+        GLTextQuad q{};
+        q.x0 = static_cast<float>(dst_x0);
+        q.y0 = static_cast<float>(dst_y0);
+        q.x1 = static_cast<float>(dst_x0 + g.w);
+        q.y1 = static_cast<float>(dst_y0 + g.h);
+        q.u0 = g.u0;
+        q.v0 = g.v0;
+        q.u1 = g.u1;
+        q.v1 = g.v1;
+        q.texture = g.texture;
+        out.quads.push_back(q);
       }
       x += g.advance;
     }
 
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    if (tex == 0) {
-      return false;
-    }
-
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, w, h, 0, GL_ALPHA,
-                 GL_UNSIGNED_BYTE, pixels.data());
-
-    out.texture = tex;
-    out.w = w;
-    out.h = h;
     return true;
 #endif
   }
@@ -361,84 +730,274 @@ private:
   FT_Library ft_{};
   FT_Face face_{};
   std::string font_path_{};
+  int last_px_{};
 #endif
 
   std::unordered_map<std::string, GLTextEntry> cache_;
+  std::unordered_map<std::uint64_t, CachedGlyph> glyphs_;
+  std::vector<AtlasPage> pages_;
 };
 
-struct GLRenderer final : Renderer {
+struct GLRenderer final {
+  GLProcs *gl{};
   int vw{};
   int vh{};
-  GLTextCache *text_cache{};
 
-  void draw_rect(const DrawRect &r) override {
-    (void)vw;
-    (void)vh;
-    glDisable(GL_TEXTURE_2D);
-    glColor4ub(r.fill.r, r.fill.g, r.fill.b, r.fill.a);
-    const float x0 = r.rect.x;
-    const float y0 = r.rect.y;
-    const float x1 = r.rect.x + r.rect.w;
-    const float y1 = r.rect.y + r.rect.h;
-    glBegin(GL_TRIANGLES);
-    glVertex2f(x0, y0);
-    glVertex2f(x1, y0);
-    glVertex2f(x0, y1);
-    glVertex2f(x0, y1);
-    glVertex2f(x1, y0);
-    glVertex2f(x1, y1);
-    glEnd();
+  GLuint program{};
+  GLint u_mvp{-1};
+  GLint u_tex{-1};
+  GLint u_use_tex{-1};
+  GLint a_pos{-1};
+  GLint a_uv{-1};
+  GLint a_color{-1};
+
+  GLuint vbo{};
+  GLuint vao{};
+  bool has_vao{};
+
+  GLuint bound_tex{};
+  int use_tex{};
+
+  ~GLRenderer() {
+    if (gl) {
+      if (vbo != 0) {
+        gl->DeleteBuffers(1, &vbo);
+      }
+      if (has_vao && vao != 0) {
+        gl->DeleteVertexArrays(1, &vao);
+      }
+      if (program != 0) {
+        gl->DeleteProgram(program);
+      }
+    }
   }
 
-  void draw_text(const DrawText &t) override {
-    if (!text_cache) {
-      return;
-    }
-    const auto *entry = text_cache->get(t.text, t.font_px);
-    if (!entry || entry->texture == 0 || entry->w <= 0 || entry->h <= 0) {
-      return;
+  bool init(GLProcs &p) {
+    gl = &p;
+    has_vao = gl->has_vao;
+
+    const char *vs_src =
+        "#version 120\n"
+        "attribute vec2 aPos;\n"
+        "attribute vec2 aUV;\n"
+        "attribute vec4 aColor;\n"
+        "uniform mat4 uMVP;\n"
+        "varying vec2 vUV;\n"
+        "varying vec4 vColor;\n"
+        "void main() {\n"
+        "  vUV = aUV;\n"
+        "  vColor = aColor;\n"
+        "  gl_Position = uMVP * vec4(aPos, 0.0, 1.0);\n"
+        "}\n";
+
+    const char *fs_src =
+        "#version 120\n"
+        "uniform sampler2D uTex;\n"
+        "uniform int uUseTex;\n"
+        "varying vec2 vUV;\n"
+        "varying vec4 vColor;\n"
+        "void main() {\n"
+        "  float a = 1.0;\n"
+        "  if (uUseTex != 0) {\n"
+        "    a = texture2D(uTex, vUV).a;\n"
+        "  }\n"
+        "  gl_FragColor = vec4(vColor.rgb, vColor.a * a);\n"
+        "}\n";
+
+    const GLuint vs = duorou_compile_shader(*gl, GL_VERTEX_SHADER, vs_src);
+    const GLuint fs = duorou_compile_shader(*gl, GL_FRAGMENT_SHADER, fs_src);
+    if (vs == 0 || fs == 0) {
+      if (vs != 0) {
+        gl->DeleteShader(vs);
+      }
+      if (fs != 0) {
+        gl->DeleteShader(fs);
+      }
+      return false;
     }
 
-    const float tex_w = static_cast<float>(entry->w);
-    const float tex_h = static_cast<float>(entry->h);
-    const float target_w = t.rect.w;
-    const float target_h = t.rect.h;
-    const float scale = std::min(target_w / tex_w, target_h / tex_h);
-    if (!(scale > 0.0f)) {
-      return;
+    program = duorou_link_program(*gl, vs, fs);
+    gl->DeleteShader(vs);
+    gl->DeleteShader(fs);
+    if (program == 0) {
+      return false;
     }
 
-    const float draw_w = tex_w * scale;
-    const float draw_h = tex_h * scale;
-    const float x = t.rect.x + (t.rect.w - draw_w) * 0.5f;
-    const float y = t.rect.y + (t.rect.h - draw_h) * 0.5f;
+    u_mvp = gl->GetUniformLocation(program, "uMVP");
+    u_tex = gl->GetUniformLocation(program, "uTex");
+    u_use_tex = gl->GetUniformLocation(program, "uUseTex");
+    a_pos = gl->GetAttribLocation(program, "aPos");
+    a_uv = gl->GetAttribLocation(program, "aUV");
+    a_color = gl->GetAttribLocation(program, "aColor");
+    if (u_mvp < 0 || u_tex < 0 || u_use_tex < 0 || a_pos < 0 || a_uv < 0 ||
+        a_color < 0) {
+      return false;
+    }
+
+    gl->GenBuffers(1, &vbo);
+    if (vbo == 0) {
+      return false;
+    }
+
+    if (has_vao) {
+      gl->GenVertexArrays(1, &vao);
+      if (vao == 0) {
+        has_vao = false;
+      }
+    }
+
+    if (has_vao) {
+      gl->BindVertexArray(vao);
+      gl->BindBuffer(GL_ARRAY_BUFFER, vbo);
+      setup_attribs();
+      gl->BindVertexArray(0);
+    }
+
+    return true;
+  }
+
+  void begin_frame(int w, int h) {
+    vw = w;
+    vh = h;
+    glViewport(0, 0, w, h);
+
+    gl->UseProgram(program);
+    float mvp[16]{};
+    duorou_ortho_px(w, h, mvp);
+    gl->UniformMatrix4fv(u_mvp, 1, GL_FALSE, mvp);
+    gl->ActiveTexture(GL_TEXTURE0);
+    gl->Uniform1i(u_tex, 0);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, entry->texture);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-    glColor4ub(t.color.r, t.color.g, t.color.b, t.color.a);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_DEPTH_TEST);
+    glEnable(GL_SCISSOR_TEST);
 
-    const float x0 = x;
-    const float y0 = y;
-    const float x1 = x + draw_w;
-    const float y1 = y + draw_h;
+    bound_tex = 0;
+    use_tex = 0;
+    gl->Uniform1i(u_use_tex, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
 
-    glBegin(GL_TRIANGLES);
-    glTexCoord2f(0.0f, 0.0f);
-    glVertex2f(x0, y0);
-    glTexCoord2f(1.0f, 0.0f);
-    glVertex2f(x1, y0);
-    glTexCoord2f(0.0f, 1.0f);
-    glVertex2f(x0, y1);
-    glTexCoord2f(0.0f, 1.0f);
-    glVertex2f(x0, y1);
-    glTexCoord2f(1.0f, 0.0f);
-    glVertex2f(x1, y0);
-    glTexCoord2f(1.0f, 1.0f);
-    glVertex2f(x1, y1);
-    glEnd();
+    apply_scissor(RectF{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)});
+
+    if (has_vao) {
+      gl->BindVertexArray(vao);
+    } else {
+      gl->BindBuffer(GL_ARRAY_BUFFER, vbo);
+      setup_attribs();
+    }
+  }
+
+  void end_frame() {
+    if (has_vao) {
+      gl->BindVertexArray(0);
+    } else {
+      gl->DisableVertexAttribArray(static_cast<GLuint>(a_pos));
+      gl->DisableVertexAttribArray(static_cast<GLuint>(a_uv));
+      gl->DisableVertexAttribArray(static_cast<GLuint>(a_color));
+      gl->BindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    glDisable(GL_SCISSOR_TEST);
+    gl->UseProgram(0);
+  }
+
+  void draw_tree(const RenderTree &tree) {
+    if (!gl) {
+      return;
+    }
+    if (tree.vertices.empty() || tree.batches.empty()) {
+      return;
+    }
+
+    gl->BindBuffer(GL_ARRAY_BUFFER, vbo);
+    const auto bytes =
+        static_cast<std::ptrdiff_t>(tree.vertices.size() * sizeof(RenderVertex));
+    gl->BufferData(GL_ARRAY_BUFFER, bytes, tree.vertices.data(), GL_STREAM_DRAW);
+
+    RectF last_scissor{};
+    bool has_last_scissor = false;
+
+    GLuint last_tex = bound_tex;
+    int last_use_tex = use_tex;
+
+    for (const auto &b : tree.batches) {
+      if (b.count == 0) {
+        continue;
+      }
+
+      if (!has_last_scissor || b.scissor.x != last_scissor.x ||
+          b.scissor.y != last_scissor.y || b.scissor.w != last_scissor.w ||
+          b.scissor.h != last_scissor.h) {
+        apply_scissor(b.scissor);
+        last_scissor = b.scissor;
+        has_last_scissor = true;
+      }
+
+      if (b.pipeline == RenderPipeline::Color) {
+        if (last_use_tex != 0) {
+          gl->Uniform1i(u_use_tex, 0);
+          last_use_tex = 0;
+        }
+        if (last_tex != 0) {
+          glBindTexture(GL_TEXTURE_2D, 0);
+          last_tex = 0;
+        }
+      } else {
+        const auto tex = static_cast<GLuint>(b.texture);
+        if (last_use_tex != 1) {
+          gl->Uniform1i(u_use_tex, 1);
+          last_use_tex = 1;
+        }
+        if (tex != last_tex) {
+          glBindTexture(GL_TEXTURE_2D, tex);
+          last_tex = tex;
+        }
+      }
+
+      glDrawArrays(GL_TRIANGLES, static_cast<GLint>(b.first),
+                   static_cast<GLsizei>(b.count));
+    }
+
+    use_tex = last_use_tex;
+    bound_tex = last_tex;
+  }
+
+private:
+  void apply_scissor(RectF r) {
+    int x0 = static_cast<int>(std::floor(r.x));
+    int y0 = static_cast<int>(std::floor(r.y));
+    int x1 = static_cast<int>(std::ceil(r.x + r.w));
+    int y1 = static_cast<int>(std::ceil(r.y + r.h));
+
+    x0 = std::max(0, std::min(x0, vw));
+    y0 = std::max(0, std::min(y0, vh));
+    x1 = std::max(0, std::min(x1, vw));
+    y1 = std::max(0, std::min(y1, vh));
+
+    const int w = std::max(0, x1 - x0);
+    const int h = std::max(0, y1 - y0);
+    const int sc_y = vh - (y0 + h);
+    glScissor(x0, sc_y, w, h);
+  }
+
+  void setup_attribs() {
+    gl->EnableVertexAttribArray(static_cast<GLuint>(a_pos));
+    gl->EnableVertexAttribArray(static_cast<GLuint>(a_uv));
+    gl->EnableVertexAttribArray(static_cast<GLuint>(a_color));
+
+    gl->VertexAttribPointer(static_cast<GLuint>(a_pos), 2, GL_FLOAT, GL_FALSE,
+                            static_cast<GLsizei>(sizeof(RenderVertex)),
+                            reinterpret_cast<const void *>(
+                                offsetof(RenderVertex, x)));
+    gl->VertexAttribPointer(static_cast<GLuint>(a_uv), 2, GL_FLOAT, GL_FALSE,
+                            static_cast<GLsizei>(sizeof(RenderVertex)),
+                            reinterpret_cast<const void *>(
+                                offsetof(RenderVertex, u)));
+    gl->VertexAttribPointer(
+        static_cast<GLuint>(a_color), 4, GL_UNSIGNED_BYTE, GL_TRUE,
+        static_cast<GLsizei>(sizeof(RenderVertex)),
+        reinterpret_cast<const void *>(offsetof(RenderVertex, rgba)));
   }
 };
 
@@ -446,6 +1005,43 @@ struct InputCtx {
   ViewInstance *app{};
   int pointer_id{1};
 };
+
+static void utf8_append(std::string &out, std::uint32_t cp) {
+  if (cp <= 0x7F) {
+    out.push_back(static_cast<char>(cp));
+    return;
+  }
+  if (cp <= 0x7FF) {
+    out.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    return;
+  }
+  if (cp <= 0xFFFF) {
+    out.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
+    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    return;
+  }
+  out.push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
+  out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+  out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+  out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+}
+
+static void utf8_pop_back(std::string &s) {
+  if (s.empty()) {
+    return;
+  }
+  std::size_t i = s.size() - 1;
+  while (i > 0) {
+    const auto b = static_cast<std::uint8_t>(s[i]);
+    if ((b & 0xC0) != 0x80) {
+      break;
+    }
+    --i;
+  }
+  s.erase(i);
+}
 
 static void cursor_pos_cb(GLFWwindow *win, double xpos, double ypos) {
   auto *ctx = static_cast<InputCtx *>(glfwGetWindowUserPointer(win));
@@ -505,6 +1101,31 @@ static void mouse_button_cb(GLFWwindow *win, int button, int action, int mods) {
   }
 }
 
+static void key_cb(GLFWwindow *win, int key, int scancode, int action,
+                   int mods) {
+  auto *ctx = static_cast<InputCtx *>(glfwGetWindowUserPointer(win));
+  if (!ctx || !ctx->app) {
+    return;
+  }
+  if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+    ctx->app->dispatch_key_down(key, scancode, mods);
+  } else if (action == GLFW_RELEASE) {
+    ctx->app->dispatch_key_up(key, scancode, mods);
+  }
+}
+
+static void char_cb(GLFWwindow *win, unsigned int codepoint) {
+  auto *ctx = static_cast<InputCtx *>(glfwGetWindowUserPointer(win));
+  if (!ctx || !ctx->app) {
+    return;
+  }
+  std::string text;
+  utf8_append(text, static_cast<std::uint32_t>(codepoint));
+  if (!text.empty()) {
+    ctx->app->dispatch_text_input(std::move(text));
+  }
+}
+
 int main() {
   if (!glfwInit()) {
     return 1;
@@ -523,8 +1144,23 @@ int main() {
   glfwMakeContextCurrent(win);
   glfwSwapInterval(1);
 
+  GLProcs gl{};
+  if (!duorou_gl_load(gl)) {
+    glfwDestroyWindow(win);
+    glfwTerminate();
+    return 1;
+  }
+
+  GLRenderer renderer;
+  if (!renderer.init(gl)) {
+    glfwDestroyWindow(win);
+    glfwTerminate();
+    return 1;
+  }
+
   auto count = state<std::int64_t>(0);
   auto pressed = state<bool>(false);
+  auto typed = state<std::string>(std::string{});
 
   ViewInstance app{[&]() {
     return view("Column")
@@ -535,6 +1171,9 @@ int main() {
             view("Text")
                 .prop("value",
                       std::string{"Count: "} + std::to_string(count.get()))
+                .build(),
+            view("Text")
+                .prop("value", std::string{"Typed: "} + typed.get())
                 .build(),
             view("Button")
                 .key("inc")
@@ -550,6 +1189,22 @@ int main() {
                          count.set(count.get() + 1);
                        }))
                 .build(),
+            view("Button")
+                .key("input")
+                .prop("title", "Focus and type")
+                .event("key_down", on_key_down([typed]() mutable {
+                         if (key_code() == GLFW_KEY_BACKSPACE) {
+                           auto s = typed.get();
+                           utf8_pop_back(s);
+                           typed.set(std::move(s));
+                         }
+                       }))
+                .event("text_input", on_text_input([typed]() mutable {
+                         auto s = typed.get();
+                         s.append(text_input());
+                         typed.set(std::move(s));
+                       }))
+                .build(),
         })
         .build();
   }};
@@ -559,9 +1214,46 @@ int main() {
   glfwSetWindowUserPointer(win, &input);
   glfwSetCursorPosCallback(win, cursor_pos_cb);
   glfwSetMouseButtonCallback(win, mouse_button_cb);
+  glfwSetKeyCallback(win, key_cb);
+  glfwSetCharCallback(win, char_cb);
 
   {
     GLTextCache text_cache;
+    struct GLTextProvider final : TextProvider {
+      GLTextCache *cache{};
+
+      bool layout_text(std::string_view text, float font_px,
+                       TextLayout &out) override {
+        out.quads.clear();
+        if (!cache) {
+          return false;
+        }
+        const auto *e = cache->get(text, font_px);
+        if (!e) {
+          return false;
+        }
+        out.w = static_cast<float>(e->w);
+        out.h = static_cast<float>(e->h);
+        out.quads.reserve(e->quads.size());
+        for (const auto &q : e->quads) {
+          TextQuad tq;
+          tq.x0 = q.x0;
+          tq.y0 = q.y0;
+          tq.x1 = q.x1;
+          tq.y1 = q.y1;
+          tq.u0 = q.u0;
+          tq.v0 = q.v0;
+          tq.u1 = q.u1;
+          tq.v1 = q.v1;
+          tq.texture = static_cast<TextureHandle>(q.texture);
+          out.quads.push_back(tq);
+        }
+        return true;
+      }
+    };
+
+    GLTextProvider text;
+    text.cache = &text_cache;
 
     int last_fbw = 0;
     int last_fbh = 0;
@@ -584,16 +1276,15 @@ int main() {
 
       app.update();
 
-      gl_set_ortho(fbw, fbh);
-      glDisable(GL_DEPTH_TEST);
       glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
 
-      GLRenderer renderer;
-      renderer.vw = fbw;
-      renderer.vh = fbh;
-      renderer.text_cache = &text_cache;
-      render_with(renderer, app.render_ops());
+      renderer.begin_frame(fbw, fbh);
+      const auto tree = build_render_tree(
+          app.render_ops(), SizeF{static_cast<float>(fbw), static_cast<float>(fbh)},
+          text);
+      renderer.draw_tree(tree);
+      renderer.end_frame();
 
       glfwSwapBuffers(win);
     }

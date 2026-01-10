@@ -17,59 +17,40 @@ using namespace duorou::ui;
 static NSString *duorou_msl_source() {
   return @"#include <metal_stdlib>\n"
           "using namespace metal;\n"
-          "struct VertexColor { float2 pos; float4 color; };\n"
-          "struct VSColorOut { float4 pos [[position]]; float4 color; };\n"
-          "vertex VSColorOut duorou_vertex_color(const device VertexColor* vtx "
-          "[[buffer(0)]], uint vid [[vertex_id]]) {\n"
-          "  VSColorOut o;\n"
-          "  o.pos = float4(vtx[vid].pos, 0.0, 1.0);\n"
-          "  o.color = vtx[vid].color;\n"
+          "struct Vertex { packed_float2 pos; packed_float2 uv; uint color; };\n"
+          "static inline float4 unpack_color(uint c) {\n"
+          "  float r = float(c & 255u) / 255.0;\n"
+          "  float g = float((c >> 8) & 255u) / 255.0;\n"
+          "  float b = float((c >> 16) & 255u) / 255.0;\n"
+          "  float a = float((c >> 24) & 255u) / 255.0;\n"
+          "  return float4(r, g, b, a);\n"
+          "}\n"
+          "struct VSOut { float4 pos [[position]]; float2 uv; float4 color; };\n"
+          "vertex VSOut duorou_vertex(const device Vertex* vtx [[buffer(0)]],\n"
+          "                           constant float2& viewport [[buffer(1)]],\n"
+          "                           uint vid [[vertex_id]]) {\n"
+          "  VSOut o;\n"
+          "  float2 p = float2(vtx[vid].pos);\n"
+          "  float vw = max(1.0, viewport.x);\n"
+          "  float vh = max(1.0, viewport.y);\n"
+          "  float x = (p.x / vw) * 2.0 - 1.0;\n"
+          "  float y = 1.0 - (p.y / vh) * 2.0;\n"
+          "  o.pos = float4(x, y, 0.0, 1.0);\n"
+          "  o.uv = float2(vtx[vid].uv);\n"
+          "  o.color = unpack_color(vtx[vid].color);\n"
           "  return o;\n"
           "}\n"
-          "fragment float4 duorou_fragment_color(VSColorOut in [[stage_in]]) "
-          "{\n"
+          "fragment float4 duorou_fragment_color(VSOut in [[stage_in]]) {\n"
           "  return in.color;\n"
           "}\n"
-          "struct VertexTex { float2 pos; float2 uv; float4 color; };\n"
-          "struct VSTexOut { float4 pos [[position]]; float2 uv; float4 color; "
-          "};\n"
-          "vertex VSTexOut duorou_vertex_tex(const device VertexTex* vtx "
-          "[[buffer(0)]], uint vid [[vertex_id]]) {\n"
-          "  VSTexOut o;\n"
-          "  o.pos = float4(vtx[vid].pos, 0.0, 1.0);\n"
-          "  o.uv = vtx[vid].uv;\n"
-          "  o.color = vtx[vid].color;\n"
-          "  return o;\n"
-          "}\n"
-          "fragment float4 duorou_fragment_tex(VSTexOut in [[stage_in]], "
-          "texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+          "fragment float4 duorou_fragment_tex(VSOut in [[stage_in]],\n"
+          "                                  texture2d<float> tex [[texture(0)]],\n"
+          "                                  sampler s [[sampler(0)]]) {\n"
           "  float a = tex.sample(s, in.uv).a;\n"
           "  float ao = a * in.color.a;\n"
           "  return float4(in.color.rgb * ao, ao);\n"
           "}\n";
 }
-
-typedef struct {
-  float x;
-  float y;
-  float _pad0;
-  float _pad1;
-  float r;
-  float g;
-  float b;
-  float a;
-} VertexColor;
-
-typedef struct {
-  float x;
-  float y;
-  float u;
-  float v;
-  float r;
-  float g;
-  float b;
-  float a;
-} VertexTex;
 
 static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
                                                NSString *text, CGFloat font_px,
@@ -218,7 +199,7 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
     return self;
   }
 
-  id<MTLFunction> vtxColor = [lib newFunctionWithName:@"duorou_vertex_color"];
+  id<MTLFunction> vtxColor = [lib newFunctionWithName:@"duorou_vertex"];
   id<MTLFunction> fragColor =
       [lib newFunctionWithName:@"duorou_fragment_color"];
 
@@ -234,7 +215,7 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
     NSLog(@"Failed to create color pipeline: %@", err);
   }
 
-  id<MTLFunction> vtxTex = [lib newFunctionWithName:@"duorou_vertex_tex"];
+  id<MTLFunction> vtxTex = [lib newFunctionWithName:@"duorou_vertex"];
   id<MTLFunction> fragTex = [lib newFunctionWithName:@"duorou_fragment_tex"];
 
   MTLRenderPipelineDescriptor *descTex =
@@ -292,73 +273,46 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
   const float vw = viewport.w > 0 ? viewport.w : 1.0f;
   const float vh = viewport.h > 0 ? viewport.h : 1.0f;
 
-  std::vector<VertexColor> colorVertices;
-  struct TextBatch {
-    std::vector<VertexTex> vertices;
-    id<MTLTexture> texture;
-  };
-  std::vector<TextBatch> textBatches;
-
-  struct MetalOpRenderer final : Renderer {
+  const CGSize ds = view.drawableSize;
+  const float sx =
+      view.bounds.size.width > 0.0 ? (float)ds.width / (float)view.bounds.size.width
+                                   : 1.0f;
+  const float sy =
+      view.bounds.size.height > 0.0
+          ? (float)ds.height / (float)view.bounds.size.height
+          : 1.0f;
+  struct MetalTextProvider final : TextProvider {
     DuorouMetalView *owner{};
     MTKView *mtkView{};
-    float vw{};
-    float vh{};
-    std::vector<VertexColor> *colorVertices{};
-    std::vector<TextBatch> *textBatches{};
 
-    void draw_rect(const DrawRect &v) override {
-      float x = v.rect.x;
-      float y = v.rect.y;
-      float w = v.rect.w;
-      float h = v.rect.h;
-
-      float x0 = (x / vw) * 2.0f - 1.0f;
-      float y0 = 1.0f - (y / vh) * 2.0f;
-      float x1 = ((x + w) / vw) * 2.0f - 1.0f;
-      float y1 = 1.0f - ((y + h) / vh) * 2.0f;
-
-      float r = v.fill.r / 255.0f;
-      float g = v.fill.g / 255.0f;
-      float b = v.fill.b / 255.0f;
-      float a = v.fill.a / 255.0f;
-
-      VertexColor v0{x0, y0, 0.0f, 0.0f, r, g, b, a};
-      VertexColor v1{x1, y0, 0.0f, 0.0f, r, g, b, a};
-      VertexColor v2{x0, y1, 0.0f, 0.0f, r, g, b, a};
-      VertexColor v3{x1, y1, 0.0f, 0.0f, r, g, b, a};
-
-      colorVertices->push_back(v0);
-      colorVertices->push_back(v1);
-      colorVertices->push_back(v2);
-      colorVertices->push_back(v2);
-      colorVertices->push_back(v1);
-      colorVertices->push_back(v3);
-    }
-
-    void draw_text(const DrawText &v) override {
-      if (v.text.empty()) {
-        return;
+    bool layout_text(std::string_view text, float font_px,
+                     TextLayout &out) override {
+      out.quads.clear();
+      if (!owner || !mtkView) {
+        return false;
+      }
+      if (text.empty()) {
+        return false;
       }
 
-      NSString *text = [[NSString alloc] initWithBytes:v.text.data()
-                                                length:v.text.size()
-                                              encoding:NSUTF8StringEncoding];
-      if (!text) {
-        return;
+      NSString *nsText = [[NSString alloc] initWithBytes:text.data()
+                                                  length:text.size()
+                                                encoding:NSUTF8StringEncoding];
+      if (!nsText) {
+        return false;
       }
 
       NSString *cacheKey =
-          [NSString stringWithFormat:@"%.2f:%@", (double)v.font_px, text];
+          [NSString stringWithFormat:@"%.2f:%@", (double)font_px, nsText];
 
       NSValue *sizeVal = [owner.textSizeCache objectForKey:cacheKey];
       id<MTLTexture> tex = [owner.textCache objectForKey:cacheKey];
       CGSize size;
       if (!tex || !sizeVal) {
         size = CGSizeZero;
-        tex = duorou_make_text_texture(mtkView.device, text, v.font_px, &size);
+        tex = duorou_make_text_texture(mtkView.device, nsText, font_px, &size);
         if (!tex || size.width <= 0.0 || size.height <= 0.0) {
-          return;
+          return false;
         }
         [owner.textCache setObject:tex forKey:cacheKey];
         [owner.textSizeCache setObject:[NSValue valueWithSize:size]
@@ -367,66 +321,40 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
         size = [sizeVal sizeValue];
       }
 
-      float tex_w = static_cast<float>(size.width);
-      float tex_h = static_cast<float>(size.height);
-      if (tex_w <= 0.0f || tex_h <= 0.0f) {
-        return;
+      out.w = static_cast<float>(size.width);
+      out.h = static_cast<float>(size.height);
+      if (!(out.w > 0.0f) || !(out.h > 0.0f)) {
+        return false;
       }
 
-      float target_w = v.rect.w;
-      float target_h = v.rect.h;
-      float scale = std::min(target_w / tex_w, target_h / tex_h);
-      if (scale <= 0.0f) {
-        return;
-      }
-
-      float draw_w = tex_w * scale;
-      float draw_h = tex_h * scale;
-      float x = v.rect.x + (v.rect.w - draw_w) * 0.5f;
-      float y = v.rect.y + (v.rect.h - draw_h) * 0.5f;
-
-      float x0 = (x / vw) * 2.0f - 1.0f;
-      float y0 = 1.0f - (y / vh) * 2.0f;
-      float x1 = ((x + draw_w) / vw) * 2.0f - 1.0f;
-      float y1 = 1.0f - ((y + draw_h) / vh) * 2.0f;
-
-      float r = v.color.r / 255.0f;
-      float g = v.color.g / 255.0f;
-      float b = v.color.b / 255.0f;
-      float a = v.color.a / 255.0f;
-
-      TextBatch batch;
-      batch.texture = tex;
-      batch.vertices.reserve(6);
-
-      batch.vertices.push_back(VertexTex{x0, y0, 0.0f, 0.0f, r, g, b, a});
-      batch.vertices.push_back(VertexTex{x1, y0, 1.0f, 0.0f, r, g, b, a});
-      batch.vertices.push_back(VertexTex{x0, y1, 0.0f, 1.0f, r, g, b, a});
-      batch.vertices.push_back(VertexTex{x0, y1, 0.0f, 1.0f, r, g, b, a});
-      batch.vertices.push_back(VertexTex{x1, y0, 1.0f, 0.0f, r, g, b, a});
-      batch.vertices.push_back(VertexTex{x1, y1, 1.0f, 1.0f, r, g, b, a});
-
-      textBatches->push_back(std::move(batch));
+      TextQuad q;
+      q.x0 = 0.0f;
+      q.y0 = 0.0f;
+      q.x1 = out.w;
+      q.y1 = out.h;
+      q.u0 = 0.0f;
+      q.v0 = 0.0f;
+      q.u1 = 1.0f;
+      q.v1 = 1.0f;
+      q.texture = static_cast<TextureHandle>(
+          (std::uint64_t)(std::uintptr_t)(__bridge void *)tex);
+      out.quads.push_back(q);
+      return true;
     }
   };
 
-  MetalOpRenderer renderer;
-  renderer.owner = self;
-  renderer.mtkView = view;
-  renderer.vw = vw;
-  renderer.vh = vh;
-  renderer.colorVertices = &colorVertices;
-  renderer.textBatches = &textBatches;
+  MetalTextProvider text;
+  text.owner = self;
+  text.mtkView = view;
 
-  render_with(renderer, self.instance->render_ops());
+  const auto tree = build_render_tree(self.instance->render_ops(),
+                                      SizeF{viewport.w, viewport.h}, text);
 
   id<MTLCommandBuffer> cmd = [self.queue commandBuffer];
   id<MTLRenderCommandEncoder> enc =
       [cmd renderCommandEncoderWithDescriptor:pass];
   [enc setCullMode:MTLCullModeNone];
   [enc setFrontFacingWinding:MTLWindingClockwise];
-
-  const CGSize ds = view.drawableSize;
   MTLViewport vp;
   vp.originX = 0.0;
   vp.originY = 0.0;
@@ -436,40 +364,88 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
   vp.zfar = 1.0;
   [enc setViewport:vp];
 
-  MTLScissorRect sc;
-  sc.x = 0;
-  sc.y = 0;
-  sc.width = (NSUInteger)std::max(1.0, (double)ds.width);
-  sc.height = (NSUInteger)std::max(1.0, (double)ds.height);
-  [enc setScissorRect:sc];
-  if (!colorVertices.empty()) {
-    [enc setRenderPipelineState:self.pipelineColor];
-    [enc setVertexBytes:colorVertices.data()
-                 length:colorVertices.size() * sizeof(VertexColor)
+  auto to_scissor = [&](RectF r) {
+    float x0f = std::floor(r.x * sx);
+    float y0f = std::floor(r.y * sy);
+    float x1f = std::ceil((r.x + r.w) * sx);
+    float y1f = std::ceil((r.y + r.h) * sy);
+
+    const int maxw = (int)std::max(1.0, (double)ds.width);
+    const int maxh = (int)std::max(1.0, (double)ds.height);
+
+    int x0 = std::max(0, std::min((int)x0f, maxw));
+    int y0 = std::max(0, std::min((int)y0f, maxh));
+    int x1 = std::max(0, std::min((int)x1f, maxw));
+    int y1 = std::max(0, std::min((int)y1f, maxh));
+
+    const int w = std::max(0, x1 - x0);
+    const int h = std::max(0, y1 - y0);
+
+    MTLScissorRect sc;
+    sc.x = (NSUInteger)x0;
+    sc.y = (NSUInteger)y0;
+    sc.width = (NSUInteger)w;
+    sc.height = (NSUInteger)h;
+    return sc;
+  };
+
+  struct MetalViewport {
+    float w{};
+    float h{};
+  };
+  MetalViewport vpu;
+  vpu.w = vw;
+  vpu.h = vh;
+
+  if (!tree.vertices.empty()) {
+    [enc setVertexBytes:tree.vertices.data()
+                 length:tree.vertices.size() * sizeof(RenderVertex)
                 atIndex:0];
-    [enc drawPrimitives:MTLPrimitiveTypeTriangle
-            vertexStart:0
-            vertexCount:(NSUInteger)colorVertices.size()];
+    [enc setVertexBytes:&vpu length:sizeof(vpu) atIndex:1];
   }
 
-  if (!textBatches.empty() && self.pipelineText && self.sampler) {
-    [enc setRenderPipelineState:self.pipelineText];
-    [enc setFragmentSamplerState:self.sampler atIndex:0];
-    for (const auto &batch : textBatches) {
-      if (!batch.texture) {
-        continue;
-      }
-      if (batch.vertices.empty()) {
-        continue;
-      }
-      [enc setFragmentTexture:batch.texture atIndex:0];
-      [enc setVertexBytes:batch.vertices.data()
-                   length:batch.vertices.size() * sizeof(VertexTex)
-                  atIndex:0];
-      [enc drawPrimitives:MTLPrimitiveTypeTriangle
-              vertexStart:0
-              vertexCount:(NSUInteger)batch.vertices.size()];
+  RenderPipeline cur = RenderPipeline::Color;
+  bool has_pipeline = false;
+
+  for (const auto &b : tree.batches) {
+    if (b.count == 0) {
+      continue;
     }
+    if (tree.vertices.empty()) {
+      break;
+    }
+
+    if (!has_pipeline || b.pipeline != cur) {
+      cur = b.pipeline;
+      has_pipeline = true;
+      if (cur == RenderPipeline::Color) {
+        [enc setRenderPipelineState:self.pipelineColor];
+      } else {
+        if (!self.pipelineText || !self.sampler) {
+          continue;
+        }
+        [enc setRenderPipelineState:self.pipelineText];
+        [enc setFragmentSamplerState:self.sampler atIndex:0];
+      }
+    }
+
+    [enc setScissorRect:to_scissor(b.scissor)];
+
+    if (cur == RenderPipeline::Text) {
+      if (b.texture == 0) {
+        continue;
+      }
+      id<MTLTexture> tex =
+          (__bridge id<MTLTexture>)(void *)(std::uintptr_t)b.texture;
+      if (!tex) {
+        continue;
+      }
+      [enc setFragmentTexture:tex atIndex:0];
+    }
+
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle
+            vertexStart:(NSUInteger)b.first
+            vertexCount:(NSUInteger)b.count];
   }
   [enc endEncoding];
   [cmd presentDrawable:drawable];

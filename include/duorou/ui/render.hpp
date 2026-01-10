@@ -35,10 +35,18 @@ struct DrawText {
   float font_px{16.0f};
 };
 
-using RenderOp = std::variant<DrawRect, DrawText>;
+struct PushClip {
+  RectF rect;
+};
+
+struct PopClip {};
+
+using RenderOp = std::variant<PushClip, PopClip, DrawRect, DrawText>;
 
 struct Renderer {
   virtual ~Renderer() = default;
+  virtual void push_clip(const PushClip &c) = 0;
+  virtual void pop_clip(const PopClip &c) = 0;
   virtual void draw_rect(const DrawRect &r) = 0;
   virtual void draw_text(const DrawText &t) = 0;
 };
@@ -48,7 +56,11 @@ inline void render_with(Renderer &renderer, const std::vector<RenderOp> &ops) {
     std::visit(
         [&](const auto &v) {
           using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, DrawRect>) {
+          if constexpr (std::is_same_v<T, PushClip>) {
+            renderer.push_clip(v);
+          } else if constexpr (std::is_same_v<T, PopClip>) {
+            renderer.pop_clip(v);
+          } else if constexpr (std::is_same_v<T, DrawRect>) {
             renderer.draw_rect(v);
           } else if constexpr (std::is_same_v<T, DrawText>) {
             renderer.draw_text(v);
@@ -56,6 +68,187 @@ inline void render_with(Renderer &renderer, const std::vector<RenderOp> &ops) {
         },
         op);
   }
+}
+
+using TextureHandle = std::uint64_t;
+
+struct RenderVertex {
+  float x{};
+  float y{};
+  float u{};
+  float v{};
+  std::uint32_t rgba{};
+};
+
+enum class RenderPipeline : std::uint8_t {
+  Color = 0,
+  Text = 1,
+};
+
+struct RenderBatch {
+  RenderPipeline pipeline{RenderPipeline::Color};
+  TextureHandle texture{};
+  RectF scissor{};
+  std::size_t first{};
+  std::size_t count{};
+};
+
+struct RenderTree {
+  SizeF viewport{};
+  std::vector<RenderVertex> vertices{};
+  std::vector<RenderBatch> batches{};
+};
+
+struct TextQuad {
+  float x0{};
+  float y0{};
+  float x1{};
+  float y1{};
+  float u0{};
+  float v0{};
+  float u1{};
+  float v1{};
+  TextureHandle texture{};
+};
+
+struct TextLayout {
+  float w{};
+  float h{};
+  std::vector<TextQuad> quads{};
+};
+
+struct TextProvider {
+  virtual ~TextProvider() = default;
+  virtual bool layout_text(std::string_view text, float font_px,
+                           TextLayout &out) = 0;
+};
+
+inline std::uint32_t pack_rgba(ColorU8 c) {
+  return static_cast<std::uint32_t>(c.r) |
+         (static_cast<std::uint32_t>(c.g) << 8) |
+         (static_cast<std::uint32_t>(c.b) << 16) |
+         (static_cast<std::uint32_t>(c.a) << 24);
+}
+
+inline RectF intersect_rect(RectF a, RectF b) {
+  const float x0 = std::max(a.x, b.x);
+  const float y0 = std::max(a.y, b.y);
+  const float x1 = std::min(a.x + a.w, b.x + b.w);
+  const float y1 = std::min(a.y + a.h, b.y + b.h);
+  const float w = std::max(0.0f, x1 - x0);
+  const float h = std::max(0.0f, y1 - y0);
+  return RectF{x0, y0, w, h};
+}
+
+inline RenderTree build_render_tree(const std::vector<RenderOp> &ops,
+                                    SizeF viewport, TextProvider &text) {
+  RenderTree tree;
+  tree.viewport = viewport;
+  tree.vertices.reserve(4096);
+  tree.batches.reserve(256);
+
+  auto rect_eq = [&](RectF a, RectF b) {
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+  };
+
+  auto ensure_batch = [&](RenderPipeline pipeline, TextureHandle texture,
+                          RectF scissor) -> RenderBatch & {
+    if (tree.batches.empty() ||
+        tree.batches.back().pipeline != pipeline ||
+        tree.batches.back().texture != texture ||
+        !rect_eq(tree.batches.back().scissor, scissor)) {
+      RenderBatch b;
+      b.pipeline = pipeline;
+      b.texture = texture;
+      b.scissor = scissor;
+      b.first = tree.vertices.size();
+      b.count = 0;
+      tree.batches.push_back(b);
+    }
+    return tree.batches.back();
+  };
+
+  auto push_quad = [&](float x0, float y0, float x1, float y1, float u0, float v0,
+                       float u1, float v1, std::uint32_t rgba) {
+    tree.vertices.push_back(RenderVertex{x0, y0, u0, v0, rgba});
+    tree.vertices.push_back(RenderVertex{x1, y0, u1, v0, rgba});
+    tree.vertices.push_back(RenderVertex{x0, y1, u0, v1, rgba});
+    tree.vertices.push_back(RenderVertex{x0, y1, u0, v1, rgba});
+    tree.vertices.push_back(RenderVertex{x1, y0, u1, v0, rgba});
+    tree.vertices.push_back(RenderVertex{x1, y1, u1, v1, rgba});
+  };
+
+  std::vector<RectF> clip_stack;
+  clip_stack.reserve(32);
+  clip_stack.push_back(RectF{0.0f, 0.0f, viewport.w, viewport.h});
+
+  auto current_clip = [&]() -> RectF {
+    if (clip_stack.empty()) {
+      return RectF{0.0f, 0.0f, viewport.w, viewport.h};
+    }
+    return clip_stack.back();
+  };
+
+  for (const auto &op : ops) {
+    std::visit(
+        [&](const auto &v) {
+          using T = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<T, PushClip>) {
+            const auto top = current_clip();
+            clip_stack.push_back(intersect_rect(top, v.rect));
+          } else if constexpr (std::is_same_v<T, PopClip>) {
+            if (!clip_stack.empty()) {
+              clip_stack.pop_back();
+            }
+            if (clip_stack.empty()) {
+              clip_stack.push_back(RectF{0.0f, 0.0f, viewport.w, viewport.h});
+            }
+          } else if constexpr (std::is_same_v<T, DrawRect>) {
+            auto &b = ensure_batch(RenderPipeline::Color, 0, current_clip());
+            push_quad(v.rect.x, v.rect.y, v.rect.x + v.rect.w, v.rect.y + v.rect.h,
+                      0.0f, 0.0f, 0.0f, 0.0f, pack_rgba(v.fill));
+            b.count += 6;
+          } else if constexpr (std::is_same_v<T, DrawText>) {
+            if (v.text.empty()) {
+              return;
+            }
+            TextLayout layout;
+            if (!text.layout_text(v.text, v.font_px, layout)) {
+              return;
+            }
+            if (!(layout.w > 0.0f) || !(layout.h > 0.0f) || layout.quads.empty()) {
+              return;
+            }
+
+            const float target_w = v.rect.w;
+            const float target_h = v.rect.h;
+            const float scale = std::min(target_w / layout.w, target_h / layout.h);
+            if (!(scale > 0.0f)) {
+              return;
+            }
+
+            const float draw_w = layout.w * scale;
+            const float draw_h = layout.h * scale;
+            const float ox = v.rect.x + (v.rect.w - draw_w) * 0.5f;
+            const float oy = v.rect.y + (v.rect.h - draw_h) * 0.5f;
+
+            const auto col = pack_rgba(v.color);
+            const auto sc = current_clip();
+            for (const auto &q : layout.quads) {
+              auto &b = ensure_batch(RenderPipeline::Text, q.texture, sc);
+              const float x0 = ox + q.x0 * scale;
+              const float y0 = oy + q.y0 * scale;
+              const float x1 = ox + q.x1 * scale;
+              const float y1 = oy + q.y1 * scale;
+              push_quad(x0, y0, x1, y1, q.u0, q.v0, q.u1, q.v1, col);
+              b.count += 6;
+            }
+          }
+        },
+        op);
+  }
+
+  return tree;
 }
 
 inline bool prop_as_bool(const Props &props, const std::string &key,
@@ -78,6 +271,11 @@ inline bool prop_as_bool(const Props &props, const std::string &key,
 
 inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
                              std::vector<RenderOp> &out) {
+  const bool clip = prop_as_bool(v.props, "clip", false);
+  if (clip) {
+    out.push_back(PushClip{l.frame});
+  }
+
   if (v.type == "Button") {
     const auto pressed = prop_as_bool(v.props, "pressed", false);
     out.push_back(DrawRect{l.frame, pressed ? ColorU8{120, 120, 120, 255}
@@ -97,12 +295,18 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
   for (std::size_t i = 0; i < n; ++i) {
     build_render_ops(v.children[i], l.children[i], out);
   }
+
+  if (clip) {
+    out.push_back(PopClip{});
+  }
 }
 
 inline std::vector<RenderOp> build_render_ops(const ViewNode &root,
                                               const LayoutNode &layout_root) {
   std::vector<RenderOp> out;
+  out.push_back(PushClip{layout_root.frame});
   build_render_ops(root, layout_root, out);
+  out.push_back(PopClip{});
   return out;
 }
 
@@ -112,7 +316,12 @@ inline void dump_render_ops(std::ostream &os,
     std::visit(
         [&](const auto &v) {
           using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, DrawRect>) {
+          if constexpr (std::is_same_v<T, PushClip>) {
+            os << "PushClip [" << v.rect.x << "," << v.rect.y << " " << v.rect.w
+               << "x" << v.rect.h << "]\n";
+          } else if constexpr (std::is_same_v<T, PopClip>) {
+            os << "PopClip\n";
+          } else if constexpr (std::is_same_v<T, DrawRect>) {
             os << "Rect [" << v.rect.x << "," << v.rect.y << " " << v.rect.w
                << "x" << v.rect.h << "]\n";
           } else if constexpr (std::is_same_v<T, DrawText>) {
@@ -198,14 +407,42 @@ inline void render_ascii(std::ostream &os, const std::vector<RenderOp> &ops,
     return RectF{r.x * sx, r.y * sy, r.w * sx, r.h * sy};
   };
 
+  auto intersect = [&](RectF a, RectF b) {
+    const float x0 = std::max(a.x, b.x);
+    const float y0 = std::max(a.y, b.y);
+    const float x1 = std::min(a.x + a.w, b.x + b.w);
+    const float y1 = std::min(a.y + a.h, b.y + b.h);
+    const float w = std::max(0.0f, x1 - x0);
+    const float h = std::max(0.0f, y1 - y0);
+    return RectF{x0, y0, w, h};
+  };
+
+  std::vector<RectF> clip_stack;
+  clip_stack.push_back(RectF{0.0f, 0.0f, static_cast<float>(cols),
+                             static_cast<float>(rows)});
+
   for (const auto &op : ops) {
     std::visit(
         [&](const auto &v) {
           using T = std::decay_t<decltype(v)>;
-          if constexpr (std::is_same_v<T, DrawRect>) {
-            draw_rect_ascii(surf, map_rect(v.rect), '#');
+          if constexpr (std::is_same_v<T, PushClip>) {
+            const auto mapped = map_rect(v.rect);
+            const auto top = clip_stack.empty() ? mapped : clip_stack.back();
+            clip_stack.push_back(intersect(top, mapped));
+          } else if constexpr (std::is_same_v<T, PopClip>) {
+            if (clip_stack.size() > 1) {
+              clip_stack.pop_back();
+            }
+          } else if constexpr (std::is_same_v<T, DrawRect>) {
+            const auto c = clip_stack.empty() ? map_rect(v.rect)
+                                              : intersect(clip_stack.back(),
+                                                          map_rect(v.rect));
+            draw_rect_ascii(surf, c, '#');
           } else if constexpr (std::is_same_v<T, DrawText>) {
-            draw_text_ascii(surf, map_rect(v.rect), v.text);
+            const auto c = clip_stack.empty() ? map_rect(v.rect)
+                                              : intersect(clip_stack.back(),
+                                                          map_rect(v.rect));
+            draw_text_ascii(surf, c, v.text);
           }
         },
         op);

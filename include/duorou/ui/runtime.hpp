@@ -154,6 +154,11 @@ struct EventDispatchContext {
   int pointer_id{};
   float x{};
   float y{};
+  int key{};
+  int scancode{};
+  int action{};
+  int mods{};
+  std::string text;
   ViewInstance *instance{};
   std::vector<std::size_t> target_path;
   std::string target_key;
@@ -182,6 +187,26 @@ inline std::uint64_t on_pointer_move(std::function<void()> fn) {
   return on_click(std::move(fn));
 }
 
+inline std::uint64_t on_focus(std::function<void()> fn) {
+  return on_click(std::move(fn));
+}
+
+inline std::uint64_t on_blur(std::function<void()> fn) {
+  return on_click(std::move(fn));
+}
+
+inline std::uint64_t on_key_down(std::function<void()> fn) {
+  return on_click(std::move(fn));
+}
+
+inline std::uint64_t on_key_up(std::function<void()> fn) {
+  return on_click(std::move(fn));
+}
+
+inline std::uint64_t on_text_input(std::function<void()> fn) {
+  return on_click(std::move(fn));
+}
+
 inline int pointer_id() {
   return detail::active_dispatch_context
              ? detail::active_dispatch_context->pointer_id
@@ -196,6 +221,35 @@ inline float pointer_x() {
 inline float pointer_y() {
   return detail::active_dispatch_context ? detail::active_dispatch_context->y
                                          : 0.0f;
+}
+
+inline int key_code() {
+  return detail::active_dispatch_context ? detail::active_dispatch_context->key
+                                         : 0;
+}
+
+inline int key_scancode() {
+  return detail::active_dispatch_context
+             ? detail::active_dispatch_context->scancode
+             : 0;
+}
+
+inline int key_action() {
+  return detail::active_dispatch_context
+             ? detail::active_dispatch_context->action
+             : 0;
+}
+
+inline int key_mods() {
+  return detail::active_dispatch_context ? detail::active_dispatch_context->mods
+                                         : 0;
+}
+
+inline std::string_view text_input() {
+  return detail::active_dispatch_context ? std::string_view{
+                                              detail::active_dispatch_context
+                                                  ->text}
+                                         : std::string_view{};
 }
 
 void capture_pointer();
@@ -424,6 +478,18 @@ public:
     return dispatch_pointer("pointer_move", pointer, x, y);
   }
 
+  bool dispatch_key_down(int key, int scancode, int mods) {
+    return dispatch_key("key_down", key, scancode, 1, mods);
+  }
+
+  bool dispatch_key_up(int key, int scancode, int mods) {
+    return dispatch_key("key_up", key, scancode, 0, mods);
+  }
+
+  bool dispatch_text_input(std::string text) {
+    return dispatch_text("text_input", std::move(text));
+  }
+
   void capture_pointer_internal(int pointer,
                                 const std::vector<std::size_t> &path,
                                 const std::string &key) {
@@ -461,12 +527,50 @@ private:
     std::string key;
   };
 
+  struct FocusTarget {
+    std::vector<std::size_t> path;
+    std::string key;
+  };
+
   struct HitResult {
     std::vector<std::size_t> path;
   };
 
   static bool contains(const RectF &r, float x, float y) {
     return x >= r.x && y >= r.y && x < (r.x + r.w) && y < (r.y + r.h);
+  }
+
+  static bool node_hittable(const ViewNode &v) {
+    if (!prop_as_bool(v.props, "hit_test", true)) {
+      return false;
+    }
+    if (prop_as_float(v.props, "opacity", 1.0f) <= 0.0f) {
+      return false;
+    }
+    const auto pe = prop_as_string(v.props, "pointer_events", "");
+    return pe != "none";
+  }
+
+  static bool node_focusable(const ViewNode &v) {
+    if (prop_as_bool(v.props, "focusable", false)) {
+      return true;
+    }
+    if (v.type == "Button") {
+      return true;
+    }
+    if (const auto it = v.events.find("key_down");
+        it != v.events.end() && it->second != 0) {
+      return true;
+    }
+    if (const auto it = v.events.find("key_up");
+        it != v.events.end() && it->second != 0) {
+      return true;
+    }
+    if (const auto it = v.events.find("text_input");
+        it != v.events.end() && it->second != 0) {
+      return true;
+    }
+    return false;
   }
 
   static const ViewNode *node_at_path(const ViewNode &root,
@@ -483,8 +587,12 @@ private:
 
   static std::optional<HitResult>
   hit_test_impl(const ViewNode &v, const LayoutNode &l, float x, float y,
-                std::vector<std::size_t> &path) {
-    if (!contains(l.frame, x, y)) {
+                RectF clip, std::vector<std::size_t> &path) {
+    const bool clip_self = prop_as_bool(v.props, "clip", false);
+    if (clip_self) {
+      clip = intersect_rect(clip, l.frame);
+    }
+    if (!contains(clip, x, y)) {
       return std::nullopt;
     }
 
@@ -492,21 +600,24 @@ private:
     for (std::size_t i = n; i > 0; --i) {
       const auto idx = i - 1;
       path.push_back(idx);
-      if (auto hit =
-              hit_test_impl(v.children[idx], l.children[idx], x, y, path)) {
+      if (auto hit = hit_test_impl(v.children[idx], l.children[idx], x, y, clip,
+                                   path)) {
         return hit;
       }
       path.pop_back();
     }
 
-    return HitResult{path};
+    if (contains(l.frame, x, y) && node_hittable(v)) {
+      return HitResult{path};
+    }
+    return std::nullopt;
   }
 
   static std::optional<HitResult> hit_test(const ViewNode &root,
                                            const LayoutNode &layout_root,
                                            float x, float y) {
     std::vector<std::size_t> path;
-    return hit_test_impl(root, layout_root, x, y, path);
+    return hit_test_impl(root, layout_root, x, y, layout_root.frame, path);
   }
 
   static bool find_path_by_key_impl(const ViewNode &v, const std::string &key,
@@ -536,53 +647,22 @@ private:
     return path;
   }
 
-  bool dispatch_pointer(const std::string &event_name, int pointer, float x,
-                        float y) {
-    detail::EventDispatchContext ctx;
-    ctx.pointer_id = pointer;
-    ctx.x = x;
-    ctx.y = y;
-    ctx.instance = this;
-
-    if (const auto cap_it = captures_.find(pointer);
-        cap_it != captures_.end()) {
-      auto path = cap_it->second.path;
-      if (!cap_it->second.key.empty()) {
-        if (const auto kp = find_path_by_key(tree_, cap_it->second.key)) {
-          path = *kp;
-        } else {
-          captures_.erase(pointer);
-        }
+  std::optional<std::vector<std::size_t>>
+  resolve_target_path(const std::vector<std::size_t> &path,
+                      const std::string &key) {
+    if (!key.empty()) {
+      if (const auto kp = find_path_by_key(tree_, key)) {
+        return *kp;
       }
-
-      const auto *vn = node_at_path(tree_, path);
-      if (vn) {
-        ctx.target_path = path;
-        ctx.target_key = vn->key;
-        detail::active_dispatch_context = &ctx;
-        const auto it = vn->events.find(event_name);
-        if (it != vn->events.end() && it->second != 0) {
-          const auto handle_id = it->second;
-          const auto h = handlers_.find(handle_id);
-          if (h != handlers_.end() && h->second) {
-            h->second();
-            detail::active_dispatch_context = nullptr;
-            return true;
-          }
-        }
-        detail::active_dispatch_context = nullptr;
-        return false;
-      }
+      return std::nullopt;
     }
+    return path;
+  }
 
-    const auto hit = hit_test(tree_, layout_, x, y);
-    if (!hit) {
-      return false;
-    }
-
-    auto path = hit->path;
+  bool dispatch_bubble(const std::string &event_name,
+                       detail::EventDispatchContext &ctx,
+                       std::vector<std::size_t> path) {
     detail::active_dispatch_context = &ctx;
-
     for (;;) {
       const auto *vn = node_at_path(tree_, path);
       if (!vn) {
@@ -607,9 +687,156 @@ private:
       }
       path.pop_back();
     }
-
     detail::active_dispatch_context = nullptr;
     return false;
+  }
+
+  std::optional<std::vector<std::size_t>> focus_path() {
+    if (!focus_) {
+      return std::nullopt;
+    }
+    if (auto p = resolve_target_path(focus_->path, focus_->key)) {
+      return p;
+    }
+    focus_.reset();
+    return std::nullopt;
+  }
+
+  void set_focus(std::optional<std::vector<std::size_t>> path) {
+    std::optional<FocusTarget> next;
+    if (path) {
+      const auto *vn = node_at_path(tree_, *path);
+      if (!vn) {
+        return;
+      }
+      FocusTarget t;
+      t.path = *path;
+      t.key = vn->key;
+      next = std::move(t);
+    }
+
+    auto prev_path = focus_path();
+    if (prev_path && next) {
+      const auto *prev_vn = node_at_path(tree_, *prev_path);
+      if (prev_vn && prev_vn->key == next->key && *prev_path == next->path) {
+        return;
+      }
+    } else if (!prev_path && !next) {
+      return;
+    }
+
+    if (prev_path) {
+      detail::EventDispatchContext ctx;
+      ctx.instance = this;
+      dispatch_bubble("blur", ctx, *prev_path);
+    }
+
+    focus_ = std::move(next);
+
+    if (path) {
+      detail::EventDispatchContext ctx;
+      ctx.instance = this;
+      dispatch_bubble("focus", ctx, *path);
+    }
+  }
+
+  void focus_from_hit_path(std::optional<std::vector<std::size_t>> hit_path) {
+    if (!hit_path) {
+      set_focus(std::nullopt);
+      return;
+    }
+    auto path = *hit_path;
+    for (;;) {
+      const auto *vn = node_at_path(tree_, path);
+      if (vn && node_focusable(*vn)) {
+        set_focus(path);
+        return;
+      }
+      if (path.empty()) {
+        break;
+      }
+      path.pop_back();
+    }
+    set_focus(std::nullopt);
+  }
+
+  bool dispatch_pointer(const std::string &event_name, int pointer, float x,
+                        float y) {
+    detail::EventDispatchContext ctx;
+    ctx.pointer_id = pointer;
+    ctx.x = x;
+    ctx.y = y;
+    ctx.instance = this;
+
+    if (const auto cap_it = captures_.find(pointer);
+        cap_it != captures_.end()) {
+      auto path = resolve_target_path(cap_it->second.path, cap_it->second.key);
+      if (!path) {
+        captures_.erase(pointer);
+      } else {
+        if (event_name == "pointer_down") {
+          focus_from_hit_path(*path);
+        }
+
+        const auto *vn = node_at_path(tree_, *path);
+        if (vn) {
+          ctx.target_path = *path;
+          ctx.target_key = vn->key;
+          detail::active_dispatch_context = &ctx;
+          const auto it = vn->events.find(event_name);
+          if (it != vn->events.end() && it->second != 0) {
+            const auto handle_id = it->second;
+            const auto h = handlers_.find(handle_id);
+            if (h != handlers_.end() && h->second) {
+              h->second();
+              detail::active_dispatch_context = nullptr;
+              return true;
+            }
+          }
+          detail::active_dispatch_context = nullptr;
+          return false;
+        }
+      }
+    }
+
+    const auto hit = hit_test(tree_, layout_, x, y);
+    if (event_name == "pointer_down") {
+      focus_from_hit_path(hit ? std::optional{hit->path} : std::nullopt);
+    }
+
+    if (!hit) {
+      return false;
+    }
+
+    return dispatch_bubble(event_name, ctx, hit->path);
+  }
+
+  bool dispatch_key(const std::string &event_name, int key, int scancode,
+                    int action, int mods) {
+    auto path = focus_path();
+    if (!path) {
+      return false;
+    }
+
+    detail::EventDispatchContext ctx;
+    ctx.instance = this;
+    ctx.key = key;
+    ctx.scancode = scancode;
+    ctx.action = action;
+    ctx.mods = mods;
+    return dispatch_bubble(event_name, ctx, *path);
+  }
+
+  bool dispatch_text(const std::string &event_name, std::string text) {
+    auto path = focus_path();
+    if (!path) {
+      return false;
+    }
+
+    detail::EventDispatchContext ctx;
+    ctx.instance = this;
+    ctx.text = std::move(text);
+    return dispatch_bubble(event_name, ctx, *path);
   }
 
   struct DepEntry {
@@ -673,6 +900,7 @@ private:
   std::vector<DepEntry> deps_{};
   std::unordered_map<std::uint64_t, std::function<void()>> handlers_{};
   std::unordered_map<int, CaptureTarget> captures_{};
+  std::optional<FocusTarget> focus_{};
   bool dirty_{true};
 };
 
