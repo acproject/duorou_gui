@@ -287,6 +287,43 @@ static GLuint duorou_link_program(GLProcs &gl, GLuint vs, GLuint fs) {
   return 0;
 }
 
+static GLuint duorou_make_demo_rgba_texture() {
+  constexpr int w = 64;
+  constexpr int h = 64;
+  std::vector<std::uint8_t> pixels(static_cast<std::size_t>(w) *
+                                       static_cast<std::size_t>(h) * 4,
+                                   0);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const int i = (y * w + x) * 4;
+      const bool chk = ((x / 8) ^ (y / 8)) & 1;
+      const std::uint8_t r =
+          static_cast<std::uint8_t>(chk ? 240 : 40);
+      const std::uint8_t g = static_cast<std::uint8_t>(x * 4);
+      const std::uint8_t b = static_cast<std::uint8_t>(y * 4);
+      pixels[static_cast<std::size_t>(i) + 0] = r;
+      pixels[static_cast<std::size_t>(i) + 1] = g;
+      pixels[static_cast<std::size_t>(i) + 2] = b;
+      pixels[static_cast<std::size_t>(i) + 3] = 255;
+    }
+  }
+
+  GLuint tex = 0;
+  glGenTextures(1, &tex);
+  if (tex == 0) {
+    return 0;
+  }
+  glBindTexture(GL_TEXTURE_2D, tex);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+               pixels.data());
+  return tex;
+}
+
 struct GLTextQuad {
   float x0{};
   float y0{};
@@ -812,7 +849,7 @@ struct GLRenderer final {
   GLuint program{};
   GLint u_mvp{-1};
   GLint u_tex{-1};
-  GLint u_use_tex{-1};
+  GLint u_tex_mode{-1};
   GLint a_pos{-1};
   GLint a_uv{-1};
   GLint a_color{-1};
@@ -859,15 +896,19 @@ struct GLRenderer final {
     const char *fs_src =
         "#version 120\n"
         "uniform sampler2D uTex;\n"
-        "uniform int uUseTex;\n"
+        "uniform int uTexMode;\n"
         "varying vec2 vUV;\n"
         "varying vec4 vColor;\n"
         "void main() {\n"
-        "  float a = 1.0;\n"
-        "  if (uUseTex != 0) {\n"
-        "    a = texture2D(uTex, vUV).a;\n"
+        "  if (uTexMode == 0) {\n"
+        "    gl_FragColor = vColor;\n"
+        "  } else if (uTexMode == 1) {\n"
+        "    float a = texture2D(uTex, vUV).a;\n"
+        "    gl_FragColor = vec4(vColor.rgb, vColor.a * a);\n"
+        "  } else {\n"
+        "    vec4 t = texture2D(uTex, vUV);\n"
+        "    gl_FragColor = vec4(vColor.rgb * t.rgb, vColor.a * t.a);\n"
         "  }\n"
-        "  gl_FragColor = vec4(vColor.rgb, vColor.a * a);\n"
         "}\n";
 
     const GLuint vs = duorou_compile_shader(*gl, GL_VERTEX_SHADER, vs_src);
@@ -891,11 +932,11 @@ struct GLRenderer final {
 
     u_mvp = gl->GetUniformLocation(program, "uMVP");
     u_tex = gl->GetUniformLocation(program, "uTex");
-    u_use_tex = gl->GetUniformLocation(program, "uUseTex");
+    u_tex_mode = gl->GetUniformLocation(program, "uTexMode");
     a_pos = gl->GetAttribLocation(program, "aPos");
     a_uv = gl->GetAttribLocation(program, "aUV");
     a_color = gl->GetAttribLocation(program, "aColor");
-    if (u_mvp < 0 || u_tex < 0 || u_use_tex < 0 || a_pos < 0 || a_uv < 0 ||
+    if (u_mvp < 0 || u_tex < 0 || u_tex_mode < 0 || a_pos < 0 || a_uv < 0 ||
         a_color < 0) {
       return false;
     }
@@ -942,7 +983,7 @@ struct GLRenderer final {
 
     bound_tex = 0;
     use_tex = 0;
-    gl->Uniform1i(u_use_tex, 0);
+    gl->Uniform1i(u_tex_mode, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
 
     apply_scissor(RectF{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)});
@@ -1002,18 +1043,28 @@ struct GLRenderer final {
 
       if (b.pipeline == RenderPipeline::Color) {
         if (last_use_tex != 0) {
-          gl->Uniform1i(u_use_tex, 0);
+          gl->Uniform1i(u_tex_mode, 0);
           last_use_tex = 0;
         }
         if (last_tex != 0) {
           glBindTexture(GL_TEXTURE_2D, 0);
           last_tex = 0;
         }
-      } else {
+      } else if (b.pipeline == RenderPipeline::Text) {
         const auto tex = static_cast<GLuint>(b.texture);
         if (last_use_tex != 1) {
-          gl->Uniform1i(u_use_tex, 1);
+          gl->Uniform1i(u_tex_mode, 1);
           last_use_tex = 1;
+        }
+        if (tex != last_tex) {
+          glBindTexture(GL_TEXTURE_2D, tex);
+          last_tex = tex;
+        }
+      } else {
+        const auto tex = static_cast<GLuint>(b.texture);
+        if (last_use_tex != 2) {
+          gl->Uniform1i(u_tex_mode, 2);
+          last_use_tex = 2;
         }
         if (tex != last_tex) {
           glBindTexture(GL_TEXTURE_2D, tex);
@@ -1224,6 +1275,9 @@ int main() {
     return 1;
   }
 
+  GLuint demo_tex = duorou_make_demo_rgba_texture();
+  const TextureHandle demo_tex_handle = static_cast<TextureHandle>(demo_tex);
+
   auto count = state<std::int64_t>(0);
   auto pressed = state<bool>(false);
   auto checked = state<bool>(true);
@@ -1256,6 +1310,43 @@ int main() {
                     view("Text")
                         .prop("value", "duorou: basic components")
                         .prop("font_size", 18.0)
+                        .build(),
+                })
+                .build(),
+
+            view("Box")
+                .prop("padding", 12)
+                .prop("bg", 0xFF202020)
+                .prop("border", 0xFF3A3A3A)
+                .prop("border_width", 1.0)
+                .children({
+                    view("Row")
+                        .prop("spacing", 12)
+                        .prop("cross_align", "center")
+                        .children({
+                            view("Image")
+                                .prop("texture",
+                                      static_cast<std::int64_t>(demo_tex_handle))
+                                .prop("width", 128.0)
+                                .prop("height", 128.0)
+                                .build(),
+                            view("Column")
+                                .prop("spacing", 6)
+                                .prop("cross_align", "start")
+                                .children({
+                                    view("Text")
+                                        .prop("value", "Image: RGBA texture")
+                                        .prop("font_size", 16.0)
+                                        .build(),
+                                    view("Text")
+                                        .prop("value",
+                                              "Sampling: RenderPipeline::Image")
+                                        .prop("font_size", 12.0)
+                                        .prop("color", 0xFFB0B0B0)
+                                        .build(),
+                                })
+                                .build(),
+                        })
                         .build(),
                 })
                 .build(),
@@ -1343,6 +1434,56 @@ int main() {
                          field.set(std::move(s));
                        }))
                 .build(),
+
+            view("Divider").prop("thickness", 1.0).prop("color", 0xFF3A3A3A).build(),
+
+            view("Box")
+                .prop("padding", 12)
+                .prop("bg", 0xFF202020)
+                .prop("border", 0xFF3A3A3A)
+                .prop("border_width", 1.0)
+                .children({
+                    view("Column")
+                        .prop("spacing", 8)
+                        .prop("cross_align", "start")
+                        .children({
+                            view("Text")
+                                .prop("value", "ScrollView/List demo (drag to scroll)")
+                                .prop("font_size", 16.0)
+                                .build(),
+                            view("ScrollView")
+                                .key("demo_scroll")
+                                .prop("clip", true)
+                                .prop("height", 220.0)
+                                .children({
+                                    view("Column")
+                                        .prop("spacing", 0.0)
+                                        .prop("cross_align", "stretch")
+                                        .children([&](auto &c) {
+                                          for (int i = 0; i < 60; ++i) {
+                                            const bool alt = (i % 2) == 0;
+                                            c.add(view("Box")
+                                                      .prop("padding", 10.0)
+                                                      .prop("bg", alt ? 0xFF262626
+                                                                      : 0xFF1E1E1E)
+                                                      .children({
+                                                          view("Text")
+                                                              .prop("value",
+                                                                    std::string{"Row "} +
+                                                                        std::to_string(i))
+                                                              .prop("color", 0xFFE0E0E0)
+                                                              .build(),
+                                                      })
+                                                      .build());
+                                          }
+                                        })
+                                        .build(),
+                                })
+                                .build(),
+                        })
+                        .build(),
+                })
+                .build(),
         })
         .build();
   }};
@@ -1426,6 +1567,10 @@ int main() {
 
       glfwSwapBuffers(win);
     }
+  }
+
+  if (demo_tex != 0) {
+    glDeleteTextures(1, &demo_tex);
   }
 
   glfwDestroyWindow(win);

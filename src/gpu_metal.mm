@@ -49,6 +49,12 @@ static NSString *duorou_msl_source() {
           "  float a = tex.sample(s, in.uv).a;\n"
           "  float ao = a * in.color.a;\n"
           "  return float4(in.color.rgb * ao, ao);\n"
+          "}\n"
+          "fragment float4 duorou_fragment_image(VSOut in [[stage_in]],\n"
+          "                                  texture2d<float> tex [[texture(0)]],\n"
+          "                                  sampler s [[sampler(0)]]) {\n"
+          "  float4 t = tex.sample(s, in.uv);\n"
+          "  return float4(in.color.rgb * t.rgb, in.color.a * t.a);\n"
           "}\n";
 }
 
@@ -144,6 +150,7 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> pipelineColor;
 @property(nonatomic, strong) id<MTLRenderPipelineState> pipelineText;
+@property(nonatomic, strong) id<MTLRenderPipelineState> pipelineImage;
 @property(nonatomic, strong) id<MTLSamplerState> sampler;
 @property(nonatomic, strong)
     NSMutableDictionary<NSString *, id<MTLTexture>> *textCache;
@@ -228,6 +235,21 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
                                                              error:&err];
   if (!self.pipelineText) {
     NSLog(@"Failed to create text pipeline: %@", err);
+  }
+
+  id<MTLFunction> vtxImg = [lib newFunctionWithName:@"duorou_vertex"];
+  id<MTLFunction> fragImg = [lib newFunctionWithName:@"duorou_fragment_image"];
+
+  MTLRenderPipelineDescriptor *descImg =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  descImg.vertexFunction = vtxImg;
+  descImg.fragmentFunction = fragImg;
+  descImg.colorAttachments[0].pixelFormat = self.colorPixelFormat;
+
+  self.pipelineImage = [device newRenderPipelineStateWithDescriptor:descImg
+                                                             error:&err];
+  if (!self.pipelineImage) {
+    NSLog(@"Failed to create image pipeline: %@", err);
   }
 
   MTLSamplerDescriptor *sd = [[MTLSamplerDescriptor alloc] init];
@@ -420,18 +442,24 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
       has_pipeline = true;
       if (cur == RenderPipeline::Color) {
         [enc setRenderPipelineState:self.pipelineColor];
-      } else {
+      } else if (cur == RenderPipeline::Text) {
         if (!self.pipelineText || !self.sampler) {
           continue;
         }
         [enc setRenderPipelineState:self.pipelineText];
+        [enc setFragmentSamplerState:self.sampler atIndex:0];
+      } else {
+        if (!self.pipelineImage || !self.sampler) {
+          continue;
+        }
+        [enc setRenderPipelineState:self.pipelineImage];
         [enc setFragmentSamplerState:self.sampler atIndex:0];
       }
     }
 
     [enc setScissorRect:to_scissor(b.scissor)];
 
-    if (cur == RenderPipeline::Text) {
+    if (cur == RenderPipeline::Text || cur == RenderPipeline::Image) {
       if (b.texture == 0) {
         continue;
       }

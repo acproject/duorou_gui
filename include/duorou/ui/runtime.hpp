@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -555,6 +556,45 @@ private:
     std::vector<std::size_t> path;
   };
 
+  static ViewNode flatten_groups(ViewNode node) {
+    std::vector<ViewNode> out_children;
+    out_children.reserve(node.children.size());
+
+    for (auto &c : node.children) {
+      auto cc = flatten_groups(std::move(c));
+      if (cc.type == "Group") {
+        for (auto &gc : cc.children) {
+          out_children.push_back(std::move(gc));
+        }
+      } else {
+        out_children.push_back(std::move(cc));
+      }
+    }
+
+    node.children = std::move(out_children);
+    return node;
+  }
+
+  static ViewNode normalize_root(ViewNode node) {
+    if (node.type != "Group") {
+      return node;
+    }
+    if (node.children.empty()) {
+      return view("Spacer").build();
+    }
+    if (node.children.size() == 1) {
+      return std::move(node.children[0]);
+    }
+    auto children = std::move(node.children);
+    auto b = view("Box");
+    b.children([&](auto &c) {
+      for (auto &ch : children) {
+        c.add(std::move(ch));
+      }
+    });
+    return std::move(b).build();
+  }
+
   static bool contains(const RectF &r, float x, float y) {
     return x >= r.x && y >= r.y && x < (r.x + r.w) && y < (r.y + r.h);
   }
@@ -607,6 +647,18 @@ private:
   static const ViewNode *node_at_path(const ViewNode &root,
                                       const std::vector<std::size_t> &path) {
     const ViewNode *cur = &root;
+    for (auto idx : path) {
+      if (idx >= cur->children.size()) {
+        return nullptr;
+      }
+      cur = &cur->children[idx];
+    }
+    return cur;
+  }
+
+  static ViewNode *node_at_path_mut(ViewNode &root,
+                                    const std::vector<std::size_t> &path) {
+    ViewNode *cur = &root;
     for (auto idx : path) {
       if (idx >= cur->children.size()) {
         return nullptr;
@@ -793,6 +845,11 @@ private:
 
   bool dispatch_pointer(const std::string &event_name, int pointer, float x,
                         float y) {
+    if ((event_name == "pointer_move" || event_name == "pointer_up") &&
+        update_scroll_from_drag(event_name, pointer, x, y)) {
+      return true;
+    }
+
     detail::EventDispatchContext ctx;
     ctx.pointer_id = pointer;
     ctx.x = x;
@@ -839,7 +896,124 @@ private:
       return false;
     }
 
+    if (event_name == "pointer_down") {
+      if (auto sv_path = scrollview_path_from_hit(hit->path)) {
+        const auto *sv = node_at_path(tree_, *sv_path);
+        if (sv) {
+          ScrollDrag d;
+          d.path = *sv_path;
+          d.key = sv->key;
+          d.start_x = x;
+          d.start_y = y;
+          d.last_y = y;
+          double sy = prop_as_float(sv->props, "scroll_y", 0.0f);
+          if (!find_prop(sv->props, "scroll_y") && !sv->key.empty()) {
+            if (const auto it = scroll_offsets_.find(sv->key);
+                it != scroll_offsets_.end()) {
+              sy = it->second;
+            }
+          }
+          d.start_scroll_y = sy;
+          d.activated = false;
+          scroll_drags_.insert_or_assign(pointer, std::move(d));
+        }
+      }
+    }
+
     return dispatch_bubble(event_name, ctx, hit->path);
+  }
+
+  struct ScrollDrag {
+    std::vector<std::size_t> path;
+    std::string key;
+    float start_x{};
+    float start_y{};
+    float last_y{};
+    double start_scroll_y{};
+    bool activated{};
+  };
+
+  std::optional<std::vector<std::size_t>>
+  scrollview_path_from_hit(std::vector<std::size_t> hit_path) {
+    for (;;) {
+      const auto *vn = node_at_path(tree_, hit_path);
+      if (vn && vn->type == "ScrollView" &&
+          prop_as_bool(vn->props, "scroll_enabled", true)) {
+        return hit_path;
+      }
+      if (hit_path.empty()) {
+        break;
+      }
+      hit_path.pop_back();
+    }
+    return std::nullopt;
+  }
+
+  void restore_scroll_offsets(ViewNode &root) {
+    if (root.type == "ScrollView" && !root.key.empty()) {
+      if (!find_prop(root.props, "scroll_y")) {
+        const auto it = scroll_offsets_.find(root.key);
+        if (it != scroll_offsets_.end()) {
+          root.props.insert_or_assign("scroll_y", PropValue{it->second});
+        }
+      }
+    }
+    for (auto &c : root.children) {
+      restore_scroll_offsets(c);
+    }
+  }
+
+  bool update_scroll_from_drag(const std::string &event_name, int pointer,
+                               float x, float y) {
+    const auto it = scroll_drags_.find(pointer);
+    if (it == scroll_drags_.end()) {
+      return false;
+    }
+
+    auto path = resolve_target_path(it->second.path, it->second.key);
+    if (!path) {
+      scroll_drags_.erase(pointer);
+      return false;
+    }
+
+    auto *vn = node_at_path_mut(tree_, *path);
+    if (!vn || vn->type != "ScrollView") {
+      scroll_drags_.erase(pointer);
+      return false;
+    }
+
+    if (event_name == "pointer_move") {
+      it->second.last_y = y;
+      const float dy = y - it->second.start_y;
+      if (!it->second.activated) {
+        if (std::abs(dy) < 3.0f) {
+          return false;
+        }
+        it->second.activated = true;
+        capture_pointer_internal(pointer, *path, vn->key);
+      }
+
+      const double next_scroll = it->second.start_scroll_y - static_cast<double>(dy);
+      vn->props.insert_or_assign("scroll_y", PropValue{next_scroll});
+      if (!vn->key.empty()) {
+        scroll_offsets_.insert_or_assign(vn->key, next_scroll);
+      }
+      layout_ = layout_tree(tree_, viewport_);
+      render_ops_ = build_render_ops(tree_, layout_);
+      return true;
+    }
+
+    if (event_name == "pointer_up") {
+      const bool was_drag = it->second.activated;
+      scroll_drags_.erase(pointer);
+      if (was_drag) {
+        release_pointer_internal(pointer);
+        return true;
+      }
+      return false;
+    }
+
+    return false;
   }
 
   bool dispatch_key(const std::string &event_name, int key, int scancode,
@@ -900,6 +1074,9 @@ private:
     detail::active_collector = nullptr;
     detail::active_event_collector = nullptr;
 
+    new_tree = normalize_root(flatten_groups(std::move(new_tree)));
+    restore_scroll_offsets(new_tree);
+
     auto patches = old_tree.type.empty() ? std::vector<PatchOp>{}
                                          : diff_tree(old_tree, new_tree);
     tree_ = std::move(new_tree);
@@ -932,6 +1109,8 @@ private:
   std::unordered_map<std::uint64_t, std::function<void()>> handlers_{};
   std::unordered_map<int, CaptureTarget> captures_{};
   std::unordered_set<int> pointers_down_{};
+  std::unordered_map<std::string, double> scroll_offsets_{};
+  std::unordered_map<int, ScrollDrag> scroll_drags_{};
   std::optional<FocusTarget> focus_{};
   bool dirty_{true};
 };
