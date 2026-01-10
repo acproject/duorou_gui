@@ -138,6 +138,39 @@ inline ViewNode Row(std::initializer_list<ViewNode> children) {
   return std::move(b).build();
 }
 
+inline ViewNode Box(std::initializer_list<ViewNode> children) {
+  auto b = view("Box");
+  b.children(children);
+  return std::move(b).build();
+}
+
+inline ViewNode Divider() {
+  auto b = view("Divider");
+  return std::move(b).build();
+}
+
+inline ViewNode Checkbox(std::string label, bool checked) {
+  auto b = view("Checkbox");
+  b.prop("label", std::move(label));
+  b.prop("checked", checked);
+  return std::move(b).build();
+}
+
+inline ViewNode Slider(double value) {
+  auto b = view("Slider");
+  b.prop("value", value);
+  return std::move(b).build();
+}
+
+inline ViewNode TextField(std::string value, std::string placeholder = {}) {
+  auto b = view("TextField");
+  b.prop("value", std::move(value));
+  if (!placeholder.empty()) {
+    b.prop("placeholder", std::move(placeholder));
+  }
+  return std::move(b).build();
+}
+
 inline void dump_tree(std::ostream &os, const ViewNode &node,
                       int indent_spaces = 0) {
   for (int i = 0; i < indent_spaces; ++i) {

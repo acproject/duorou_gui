@@ -98,6 +98,14 @@ inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
     return s;
   };
 
+  if (node.type == "Divider") {
+    const auto thickness = prop_as_float(node.props, "thickness", 1.0f);
+    const auto w = constraints.max_w;
+    const auto h = thickness;
+    return apply_explicit_size(
+        SizeF{clampf(w, 0.0f, constraints.max_w), clampf(h, 0.0f, constraints.max_h)});
+  }
+
   if (node.type == "Text") {
     const auto text = prop_as_string(node.props, "value", "");
     const auto w = static_cast<float>(text.size()) * char_w + padding * 2.0f;
@@ -111,6 +119,41 @@ inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
     const auto w =
         static_cast<float>(title.size()) * char_w + 24.0f + padding * 2.0f;
     const auto h = std::max(28.0f, line_h + 12.0f) + padding * 2.0f;
+    return apply_explicit_size(SizeF{clampf(w, 0.0f, constraints.max_w),
+                                     clampf(h, 0.0f, constraints.max_h)});
+  }
+
+  if (node.type == "Checkbox") {
+    const auto label = prop_as_string(node.props, "label", "");
+    const auto box = std::max(12.0f, font_size * 1.0f);
+    const auto gap = prop_as_float(node.props, "gap", 8.0f);
+    const auto w = box + gap + static_cast<float>(label.size()) * char_w +
+                   padding * 2.0f;
+    const auto h = std::max(box, line_h) + padding * 2.0f;
+    return apply_explicit_size(SizeF{clampf(w, 0.0f, constraints.max_w),
+                                     clampf(h, 0.0f, constraints.max_h)});
+  }
+
+  if (node.type == "Slider") {
+    const auto default_w = prop_as_float(node.props, "default_width", 160.0f);
+    const auto track_h = prop_as_float(node.props, "track_height", 4.0f);
+    const auto thumb = prop_as_float(node.props, "thumb_size", 14.0f);
+    const auto w = default_w + padding * 2.0f;
+    const auto h = std::max(track_h, thumb) + padding * 2.0f;
+    return apply_explicit_size(SizeF{clampf(w, 0.0f, constraints.max_w),
+                                     clampf(h, 0.0f, constraints.max_h)});
+  }
+
+  if (node.type == "TextField") {
+    const auto value = prop_as_string(node.props, "value", "");
+    const auto placeholder = prop_as_string(node.props, "placeholder", "");
+    const auto text_len =
+        std::max<std::size_t>(value.size(), placeholder.size());
+    const auto min_w = prop_as_float(node.props, "min_width", 140.0f);
+    const auto w = std::max(min_w, static_cast<float>(text_len) * char_w +
+                                       padding * 2.0f + 24.0f);
+    const auto h =
+        std::max(28.0f, line_h + 12.0f) + padding * 2.0f;
     return apply_explicit_size(SizeF{clampf(w, 0.0f, constraints.max_w),
                                      clampf(h, 0.0f, constraints.max_h)});
   }

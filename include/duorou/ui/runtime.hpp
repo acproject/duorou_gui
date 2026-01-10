@@ -252,6 +252,8 @@ inline std::string_view text_input() {
                                          : std::string_view{};
 }
 
+std::optional<RectF> target_frame();
+
 void capture_pointer();
 
 void release_pointer();
@@ -434,6 +436,15 @@ public:
 
   const std::vector<RenderOp> &render_ops() const { return render_ops_; }
 
+  std::optional<RectF>
+  layout_frame_at_path(const std::vector<std::size_t> &path) const {
+    const auto *ln = layout_at_path(layout_, path);
+    if (!ln) {
+      return std::nullopt;
+    }
+    return ln->frame;
+  }
+
   bool dispatch_click(float x, float y) {
     const auto hit = hit_test(tree_, layout_, x, y);
     if (!hit) {
@@ -467,14 +478,22 @@ public:
   }
 
   bool dispatch_pointer_down(int pointer, float x, float y) {
+    pointers_down_.insert(pointer);
     return dispatch_pointer("pointer_down", pointer, x, y);
   }
 
   bool dispatch_pointer_up(int pointer, float x, float y) {
-    return dispatch_pointer("pointer_up", pointer, x, y);
+    const bool handled = dispatch_pointer("pointer_up", pointer, x, y);
+    pointers_down_.erase(pointer);
+    captures_.erase(pointer);
+    return handled;
   }
 
   bool dispatch_pointer_move(int pointer, float x, float y) {
+    if (pointers_down_.find(pointer) == pointers_down_.end() &&
+        captures_.find(pointer) == captures_.end()) {
+      return false;
+    }
     return dispatch_pointer("pointer_move", pointer, x, y);
   }
 
@@ -538,6 +557,18 @@ private:
 
   static bool contains(const RectF &r, float x, float y) {
     return x >= r.x && y >= r.y && x < (r.x + r.w) && y < (r.y + r.h);
+  }
+
+  static const LayoutNode *
+  layout_at_path(const LayoutNode &root, const std::vector<std::size_t> &path) {
+    const LayoutNode *cur = &root;
+    for (auto idx : path) {
+      if (idx >= cur->children.size()) {
+        return nullptr;
+      }
+      cur = &cur->children[idx];
+    }
+    return cur;
   }
 
   static bool node_hittable(const ViewNode &v) {
@@ -900,6 +931,7 @@ private:
   std::vector<DepEntry> deps_{};
   std::unordered_map<std::uint64_t, std::function<void()>> handlers_{};
   std::unordered_map<int, CaptureTarget> captures_{};
+  std::unordered_set<int> pointers_down_{};
   std::optional<FocusTarget> focus_{};
   bool dirty_{true};
 };
@@ -922,6 +954,15 @@ inline void release_pointer() {
   }
   detail::active_dispatch_context->instance->release_pointer_internal(
       detail::active_dispatch_context->pointer_id);
+}
+
+inline std::optional<RectF> target_frame() {
+  if (!detail::active_dispatch_context ||
+      !detail::active_dispatch_context->instance) {
+    return std::nullopt;
+  }
+  return detail::active_dispatch_context->instance->layout_frame_at_path(
+      detail::active_dispatch_context->target_path);
 }
 
 } // namespace duorou::ui

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <ostream>
 #include <string>
 #include <string_view>
@@ -33,6 +34,12 @@ struct DrawText {
   std::string text;
   ColorU8 color;
   float font_px{16.0f};
+  float align_x{0.5f};
+  float align_y{0.5f};
+  bool caret_end{};
+  ColorU8 caret_color{220, 220, 220, 255};
+  float caret_w{1.0f};
+  float caret_h_factor{1.1f};
 };
 
 struct PushClip {
@@ -209,38 +216,62 @@ inline RenderTree build_render_tree(const std::vector<RenderOp> &ops,
                       0.0f, 0.0f, 0.0f, 0.0f, pack_rgba(v.fill));
             b.count += 6;
           } else if constexpr (std::is_same_v<T, DrawText>) {
-            if (v.text.empty()) {
-              return;
-            }
-            TextLayout layout;
-            if (!text.layout_text(v.text, v.font_px, layout)) {
-              return;
-            }
-            if (!(layout.w > 0.0f) || !(layout.h > 0.0f) || layout.quads.empty()) {
-              return;
-            }
-
-            const float target_w = v.rect.w;
-            const float target_h = v.rect.h;
-            const float scale = std::min(target_w / layout.w, target_h / layout.h);
-            if (!(scale > 0.0f)) {
-              return;
-            }
-
-            const float draw_w = layout.w * scale;
-            const float draw_h = layout.h * scale;
-            const float ox = v.rect.x + (v.rect.w - draw_w) * 0.5f;
-            const float oy = v.rect.y + (v.rect.h - draw_h) * 0.5f;
-
-            const auto col = pack_rgba(v.color);
             const auto sc = current_clip();
-            for (const auto &q : layout.quads) {
-              auto &b = ensure_batch(RenderPipeline::Text, q.texture, sc);
-              const float x0 = ox + q.x0 * scale;
-              const float y0 = oy + q.y0 * scale;
-              const float x1 = ox + q.x1 * scale;
-              const float y1 = oy + q.y1 * scale;
-              push_quad(x0, y0, x1, y1, q.u0, q.v0, q.u1, q.v1, col);
+            if (!v.text.empty()) {
+              TextLayout layout;
+              if (!text.layout_text(v.text, v.font_px, layout)) {
+                return;
+              }
+              if (!(layout.w > 0.0f) || !(layout.h > 0.0f) ||
+                  layout.quads.empty()) {
+                return;
+              }
+
+              const float target_w = v.rect.w;
+              const float target_h = v.rect.h;
+              const float scale =
+                  std::min(target_w / layout.w, target_h / layout.h);
+              if (!(scale > 0.0f)) {
+                return;
+              }
+
+              const float draw_w = layout.w * scale;
+              const float draw_h = layout.h * scale;
+              const float ox = v.rect.x + (v.rect.w - draw_w) * v.align_x;
+              const float oy = v.rect.y + (v.rect.h - draw_h) * v.align_y;
+
+              const auto col = pack_rgba(v.color);
+              for (const auto &q : layout.quads) {
+                auto &b = ensure_batch(RenderPipeline::Text, q.texture, sc);
+                const float x0 = ox + q.x0 * scale;
+                const float y0 = oy + q.y0 * scale;
+                const float x1 = ox + q.x1 * scale;
+                const float y1 = oy + q.y1 * scale;
+                push_quad(x0, y0, x1, y1, q.u0, q.v0, q.u1, q.v1, col);
+                b.count += 6;
+              }
+
+              if (v.caret_end) {
+                const float caret_x = ox + draw_w;
+                const float caret_h =
+                    std::min(v.rect.h, v.font_px * v.caret_h_factor * scale);
+                const float caret_y = oy + (draw_h - caret_h) * 0.5f;
+                auto &b = ensure_batch(RenderPipeline::Color, 0, sc);
+                push_quad(caret_x, caret_y, caret_x + v.caret_w,
+                          caret_y + caret_h, 0.0f, 0.0f, 0.0f, 0.0f,
+                          pack_rgba(v.caret_color));
+                b.count += 6;
+              }
+            } else if (v.caret_end) {
+              const float scale = 1.0f;
+              const float caret_h =
+                  std::min(v.rect.h, v.font_px * v.caret_h_factor * scale);
+              const float caret_y =
+                  v.rect.y + (v.rect.h - caret_h) * v.align_y;
+              const float caret_x = v.rect.x;
+              auto &b = ensure_batch(RenderPipeline::Color, 0, sc);
+              push_quad(caret_x, caret_y, caret_x + v.caret_w, caret_y + caret_h,
+                        0.0f, 0.0f, 0.0f, 0.0f, pack_rgba(v.caret_color));
               b.count += 6;
             }
           }
@@ -269,11 +300,191 @@ inline bool prop_as_bool(const Props &props, const std::string &key,
   return fallback;
 }
 
+inline std::uint8_t clamp_u8(int v) {
+  if (v < 0) {
+    return 0;
+  }
+  if (v > 255) {
+    return 255;
+  }
+  return static_cast<std::uint8_t>(v);
+}
+
+inline ColorU8 color_from_u32(std::uint32_t rgba) {
+  ColorU8 c;
+  c.r = static_cast<std::uint8_t>(rgba & 0xFFu);
+  c.g = static_cast<std::uint8_t>((rgba >> 8) & 0xFFu);
+  c.b = static_cast<std::uint8_t>((rgba >> 16) & 0xFFu);
+  c.a = static_cast<std::uint8_t>((rgba >> 24) & 0xFFu);
+  return c;
+}
+
+inline int hex_nibble(char ch) {
+  if (ch >= '0' && ch <= '9') {
+    return ch - '0';
+  }
+  if (ch >= 'a' && ch <= 'f') {
+    return 10 + (ch - 'a');
+  }
+  if (ch >= 'A' && ch <= 'F') {
+    return 10 + (ch - 'A');
+  }
+  return -1;
+}
+
+inline bool parse_hex_byte(std::string_view s, std::size_t i, std::uint8_t &out) {
+  if (i + 1 >= s.size()) {
+    return false;
+  }
+  const int hi = hex_nibble(s[i]);
+  const int lo = hex_nibble(s[i + 1]);
+  if (hi < 0 || lo < 0) {
+    return false;
+  }
+  out = static_cast<std::uint8_t>((hi << 4) | lo);
+  return true;
+}
+
+inline std::optional<ColorU8> parse_color(std::string_view s) {
+  if (s.size() == 7 && s[0] == '#') {
+    std::uint8_t r{}, g{}, b{};
+    if (!parse_hex_byte(s, 1, r) || !parse_hex_byte(s, 3, g) ||
+        !parse_hex_byte(s, 5, b)) {
+      return std::nullopt;
+    }
+    return ColorU8{r, g, b, 255};
+  }
+  if (s.size() == 9 && s[0] == '#') {
+    std::uint8_t r{}, g{}, b{}, a{};
+    if (!parse_hex_byte(s, 1, r) || !parse_hex_byte(s, 3, g) ||
+        !parse_hex_byte(s, 5, b) || !parse_hex_byte(s, 7, a)) {
+      return std::nullopt;
+    }
+    return ColorU8{r, g, b, a};
+  }
+  return std::nullopt;
+}
+
+inline ColorU8 prop_as_color(const Props &props, const std::string &key,
+                             ColorU8 fallback) {
+  const auto *pv = find_prop(props, key);
+  if (!pv) {
+    return fallback;
+  }
+  if (const auto *i = std::get_if<std::int64_t>(pv)) {
+    const auto u = static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(*i) & 0xFFFFFFFFull);
+    if (u <= 0xFFFFFFu) {
+      return ColorU8{static_cast<std::uint8_t>(u & 0xFFu),
+                     static_cast<std::uint8_t>((u >> 8) & 0xFFu),
+                     static_cast<std::uint8_t>((u >> 16) & 0xFFu), 255};
+    }
+    return color_from_u32(u);
+  }
+  if (const auto *d = std::get_if<double>(pv)) {
+    const auto u = static_cast<std::uint32_t>(static_cast<std::uint64_t>(*d));
+    if (u <= 0xFFFFFFu) {
+      return ColorU8{static_cast<std::uint8_t>(u & 0xFFu),
+                     static_cast<std::uint8_t>((u >> 8) & 0xFFu),
+                     static_cast<std::uint8_t>((u >> 16) & 0xFFu), 255};
+    }
+    return color_from_u32(u);
+  }
+  if (const auto *s = std::get_if<std::string>(pv)) {
+    if (const auto c = parse_color(*s)) {
+      return *c;
+    }
+  }
+  return fallback;
+}
+
 inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
                              std::vector<RenderOp> &out) {
   const bool clip = prop_as_bool(v.props, "clip", false);
   if (clip) {
     out.push_back(PushClip{l.frame});
+  }
+
+  if (v.type == "Box") {
+    if (find_prop(v.props, "bg")) {
+      const auto bg = prop_as_color(v.props, "bg", ColorU8{0, 0, 0, 0});
+      out.push_back(DrawRect{l.frame, bg});
+    }
+    const auto bw = prop_as_float(v.props, "border_width", 0.0f);
+    if (bw > 0.0f && find_prop(v.props, "border")) {
+      const auto bc = prop_as_color(v.props, "border", ColorU8{80, 80, 80, 255});
+      const auto t = bw;
+      out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, l.frame.w, t}, bc});
+      out.push_back(DrawRect{RectF{l.frame.x, l.frame.y + l.frame.h - t, l.frame.w, t}, bc});
+      out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, t, l.frame.h}, bc});
+      out.push_back(DrawRect{RectF{l.frame.x + l.frame.w - t, l.frame.y, t, l.frame.h}, bc});
+    }
+  } else if (v.type == "Divider") {
+    const auto col = prop_as_color(v.props, "color", ColorU8{60, 60, 60, 255});
+    out.push_back(DrawRect{l.frame, col});
+  } else if (v.type == "Checkbox") {
+    const auto padding = prop_as_float(v.props, "padding", 0.0f);
+    const auto gap = prop_as_float(v.props, "gap", 8.0f);
+    const auto font_px = prop_as_float(v.props, "font_size", 16.0f);
+    const auto box = std::max(12.0f, std::min(l.frame.h - padding * 2.0f, font_px * 1.0f));
+    const float bx = l.frame.x + padding;
+    const float by = l.frame.y + (l.frame.h - box) * 0.5f;
+    const RectF outer{bx, by, box, box};
+    out.push_back(DrawRect{outer, ColorU8{40, 40, 40, 255}});
+    if (box >= 2.0f) {
+      out.push_back(DrawRect{RectF{bx + 1.0f, by + 1.0f, box - 2.0f, box - 2.0f},
+                             ColorU8{120, 120, 120, 255}});
+    }
+    const auto checked = prop_as_bool(v.props, "checked", false);
+    if (checked && box >= 6.0f) {
+      out.push_back(DrawRect{RectF{bx + 3.0f, by + 3.0f, box - 6.0f, box - 6.0f},
+                             ColorU8{30, 200, 120, 255}});
+    }
+    const auto label = prop_as_string(v.props, "label", "");
+    const RectF tr{bx + box + gap, l.frame.y, std::max(0.0f, l.frame.w - (box + gap + padding)), l.frame.h};
+    out.push_back(DrawText{tr, label, ColorU8{230, 230, 230, 255}, font_px, 0.0f, 0.5f});
+  } else if (v.type == "Slider") {
+    const auto padding = prop_as_float(v.props, "padding", 0.0f);
+    const auto min_v = prop_as_float(v.props, "min", 0.0f);
+    const auto max_v = prop_as_float(v.props, "max", 1.0f);
+    const auto v0 = prop_as_float(v.props, "value", 0.0f);
+    const auto thumb = prop_as_float(v.props, "thumb_size", 14.0f);
+    const auto track_h = prop_as_float(v.props, "track_height", 4.0f);
+    const auto denom = (max_v - min_v);
+    const auto t = denom != 0.0f ? clampf((v0 - min_v) / denom, 0.0f, 1.0f) : 0.0f;
+    const float x0 = l.frame.x + padding;
+    const float x1 = l.frame.x + l.frame.w - padding;
+    const float w = std::max(0.0f, x1 - x0);
+    const float cy = l.frame.y + l.frame.h * 0.5f;
+    const RectF track{x0, cy - track_h * 0.5f, w, track_h};
+    out.push_back(DrawRect{track, ColorU8{60, 60, 60, 255}});
+    out.push_back(DrawRect{RectF{track.x, track.y, track.w * t, track.h}, ColorU8{80, 140, 255, 255}});
+    const float thumb_x = x0 + (w - thumb) * t;
+    const RectF knob{thumb_x, cy - thumb * 0.5f, thumb, thumb};
+    out.push_back(DrawRect{knob, ColorU8{200, 200, 200, 255}});
+  } else if (v.type == "TextField") {
+    const auto padding = prop_as_float(v.props, "padding", 10.0f);
+    const auto font_px = prop_as_float(v.props, "font_size", 16.0f);
+    const auto focused = prop_as_bool(v.props, "focused", false);
+    const auto value = prop_as_string(v.props, "value", "");
+    const auto placeholder = prop_as_string(v.props, "placeholder", "");
+    out.push_back(DrawRect{l.frame, focused ? ColorU8{55, 55, 55, 255}
+                                           : ColorU8{45, 45, 45, 255}});
+    const RectF tr{l.frame.x + padding, l.frame.y, std::max(0.0f, l.frame.w - padding * 2.0f), l.frame.h};
+    if (value.empty()) {
+      out.push_back(DrawText{tr, placeholder, ColorU8{160, 160, 160, 255},
+                             font_px, 0.0f, 0.5f});
+    } else {
+      DrawText t{tr, value, ColorU8{235, 235, 235, 255}, font_px, 0.0f, 0.5f};
+      t.caret_end = focused;
+      out.push_back(std::move(t));
+    }
+    if (focused && value.empty()) {
+      DrawText t{tr, std::string{}, ColorU8{235, 235, 235, 255}, font_px, 0.0f,
+                 0.5f};
+      t.caret_end = true;
+      out.push_back(std::move(t));
+    }
   }
 
   if (v.type == "Button") {
@@ -442,7 +653,13 @@ inline void render_ascii(std::ostream &os, const std::vector<RenderOp> &ops,
             const auto c = clip_stack.empty() ? map_rect(v.rect)
                                               : intersect(clip_stack.back(),
                                                           map_rect(v.rect));
-            draw_text_ascii(surf, c, v.text);
+            const float w = std::max(0.0f, c.w);
+            const float h = std::max(0.0f, c.h);
+            const float tw = static_cast<float>(v.text.size());
+            const float th = 1.0f;
+            const float ox = c.x + std::max(0.0f, (w - tw)) * v.align_x;
+            const float oy = c.y + std::max(0.0f, (h - th)) * v.align_y;
+            draw_text_ascii(surf, RectF{ox, oy, c.w, c.h}, v.text);
           }
         },
         op);

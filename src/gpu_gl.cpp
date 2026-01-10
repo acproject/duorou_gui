@@ -308,6 +308,11 @@ struct GLTextEntry {
 static std::string duorou_readable_font_path() {
   const char *candidates[] = {
 #if defined(_WIN32)
+      "C:/Windows/Fonts/msyh.ttc",
+      "C:/Windows/Fonts/msyh.ttf",
+      "C:/Windows/Fonts/msyhbd.ttc",
+      "C:/Windows/Fonts/simsun.ttc",
+      "C:/Windows/Fonts/simhei.ttf",
       "C:/Windows/Fonts/segoeui.ttf",
       "C:/Windows/Fonts/arial.ttf",
 #elif defined(__APPLE__)
@@ -653,6 +658,9 @@ private:
 
       const auto gi =
           static_cast<std::uint32_t>(FT_Get_Char_Index(face_, (FT_ULong)cp));
+      if (gi == 0) {
+        continue;
+      }
       const auto *g = get_glyph(gi, px);
       if (!g) {
         continue;
@@ -720,7 +728,65 @@ private:
       return false;
     }
 
+    FT_Face base{};
+    if (FT_New_Face(ft_, font_path_.c_str(), 0, &base) != 0) {
+      return false;
+    }
+
+    auto try_prepare = [&](FT_Face f) {
+      if (!f) {
+        return false;
+      }
+      if (FT_Select_Charmap(f, FT_ENCODING_UNICODE) != 0) {
+        if (f->num_charmaps > 0 && f->charmaps) {
+          if (FT_Set_Charmap(f, f->charmaps[0]) != 0) {
+            return false;
+          }
+        } else {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    if (!try_prepare(base)) {
+      FT_Done_Face(base);
+      return false;
+    }
+
+    const auto test_cp = static_cast<FT_ULong>(0x4E2Du);
+    const auto base_gi = FT_Get_Char_Index(base, test_cp);
+
+    if (base_gi != 0 || base->num_faces <= 1) {
+      face_ = base;
+      return true;
+    }
+
+    const FT_Long nfaces = base->num_faces;
+    FT_Done_Face(base);
+
+    for (FT_Long idx = 1; idx < nfaces; ++idx) {
+      FT_Face f{};
+      if (FT_New_Face(ft_, font_path_.c_str(), idx, &f) != 0) {
+        continue;
+      }
+      if (!try_prepare(f)) {
+        FT_Done_Face(f);
+        continue;
+      }
+      if (FT_Get_Char_Index(f, test_cp) != 0) {
+        face_ = f;
+        return true;
+      }
+      FT_Done_Face(f);
+    }
+
     if (FT_New_Face(ft_, font_path_.c_str(), 0, &face_) != 0) {
+      face_ = nullptr;
+      return false;
+    }
+    if (!try_prepare(face_)) {
+      FT_Done_Face(face_);
       face_ = nullptr;
       return false;
     }
@@ -1160,20 +1226,43 @@ int main() {
 
   auto count = state<std::int64_t>(0);
   auto pressed = state<bool>(false);
-  auto typed = state<std::string>(std::string{});
+  auto checked = state<bool>(true);
+  auto slider = state<double>(0.35);
+  auto field = state<std::string>(std::string{});
+  auto field_focused = state<bool>(false);
 
   ViewInstance app{[&]() {
+    auto slider_set_from_pointer = [slider]() mutable {
+      auto r = target_frame();
+      if (!r || !(r->w > 0.0f)) {
+        return;
+      }
+      const float t = (pointer_x() - r->x) / r->w;
+      const double v = static_cast<double>(std::min(1.0f, std::max(0.0f, t)));
+      slider.set(v);
+    };
+
     return view("Column")
         .prop("padding", 24)
         .prop("spacing", 12)
         .prop("cross_align", "start")
         .children({
+            view("Box")
+                .prop("padding", 12)
+                .prop("bg", 0xFF202020)
+                .prop("border", 0xFF3A3A3A)
+                .prop("border_width", 1.0)
+                .children({
+                    view("Text")
+                        .prop("value", "duorou: basic components")
+                        .prop("font_size", 18.0)
+                        .build(),
+                })
+                .build(),
+
             view("Text")
                 .prop("value",
                       std::string{"Count: "} + std::to_string(count.get()))
-                .build(),
-            view("Text")
-                .prop("value", std::string{"Typed: "} + typed.get())
                 .build(),
             view("Button")
                 .key("inc")
@@ -1189,20 +1278,69 @@ int main() {
                          count.set(count.get() + 1);
                        }))
                 .build(),
-            view("Button")
-                .key("input")
-                .prop("title", "Focus and type")
-                .event("key_down", on_key_down([typed]() mutable {
+
+            view("Divider").prop("thickness", 1.0).prop("color", 0xFF3A3A3A).build(),
+
+            view("Checkbox")
+                .key("cb")
+                .prop("label", "Enable feature")
+                .prop("checked", checked.get())
+                .event("pointer_up", on_pointer_up([checked]() mutable {
+                         checked.set(!checked.get());
+                       }))
+                .build(),
+
+            view("Text")
+                .prop("value",
+                      std::string{"Slider: "} +
+                          std::to_string(static_cast<int>(slider.get() * 100.0)))
+                .build(),
+            view("Slider")
+                .key("sl")
+                .prop("value", slider.get())
+                .prop("min", 0.0)
+                .prop("max", 1.0)
+                .event("pointer_down", on_pointer_down(
+                                         [slider_set_from_pointer]() mutable {
+                                           slider_set_from_pointer();
+                                           capture_pointer();
+                                         }))
+                .event("pointer_move", on_pointer_move(
+                                         [slider_set_from_pointer]() mutable {
+                                           slider_set_from_pointer();
+                                         }))
+                .event("pointer_up", on_pointer_up(
+                                       [slider_set_from_pointer]() mutable {
+                                         slider_set_from_pointer();
+                                         release_pointer();
+                                       }))
+                .build(),
+
+            view("Text")
+                .prop("value", std::string{"TextField: "} + field.get())
+                .build(),
+            view("TextField")
+                .key("tf")
+                .prop("value", field.get())
+                .prop("placeholder", "Type here (click to focus)")
+                .prop("focused", field_focused.get())
+                .event("focus", on_focus([field_focused]() mutable {
+                         field_focused.set(true);
+                       }))
+                .event("blur", on_blur([field_focused]() mutable {
+                         field_focused.set(false);
+                       }))
+                .event("key_down", on_key_down([field]() mutable {
                          if (key_code() == GLFW_KEY_BACKSPACE) {
-                           auto s = typed.get();
+                           auto s = field.get();
                            utf8_pop_back(s);
-                           typed.set(std::move(s));
+                           field.set(std::move(s));
                          }
                        }))
-                .event("text_input", on_text_input([typed]() mutable {
-                         auto s = typed.get();
+                .event("text_input", on_text_input([field]() mutable {
+                         auto s = field.get();
                          s.append(text_input());
-                         typed.set(std::move(s));
+                         field.set(std::move(s));
                        }))
                 .build(),
         })
