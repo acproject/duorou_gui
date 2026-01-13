@@ -16,6 +16,29 @@
 
 namespace duorou::ui {
 
+inline std::int64_t utf8_len(std::string_view s) {
+  std::int64_t n = 0;
+  for (std::size_t i = 0; i < s.size();) {
+    const auto b = static_cast<std::uint8_t>(s[i]);
+    std::size_t adv = 1;
+    if ((b & 0x80) == 0x00) {
+      adv = 1;
+    } else if ((b & 0xE0) == 0xC0) {
+      adv = 2;
+    } else if ((b & 0xF0) == 0xE0) {
+      adv = 3;
+    } else if ((b & 0xF8) == 0xF0) {
+      adv = 4;
+    }
+    if (i + adv > s.size()) {
+      adv = 1;
+    }
+    i += adv;
+    ++n;
+  }
+  return n;
+}
+
 struct ColorU8 {
   std::uint8_t r{};
   std::uint8_t g{};
@@ -38,9 +61,13 @@ struct DrawText {
   float align_x{0.5f};
   float align_y{0.5f};
   bool caret_end{};
+  std::int64_t caret_pos{-1};
   ColorU8 caret_color{220, 220, 220, 255};
   float caret_w{1.0f};
   float caret_h_factor{1.1f};
+  std::int64_t sel_start{-1};
+  std::int64_t sel_end{-1};
+  ColorU8 sel_color{70, 120, 210, 180};
 };
 
 struct DrawImage {
@@ -133,6 +160,7 @@ struct TextLayout {
   float w{};
   float h{};
   std::vector<TextQuad> quads{};
+  std::vector<float> caret_x{};
 };
 
 struct TextProvider {
@@ -164,6 +192,29 @@ inline RenderTree build_render_tree(const std::vector<RenderOp> &ops,
   tree.viewport = viewport;
   tree.vertices.reserve(4096);
   tree.batches.reserve(256);
+
+  auto utf8_len = [](std::string_view s) -> std::int64_t {
+    std::int64_t n = 0;
+    for (std::size_t i = 0; i < s.size();) {
+      const auto b = static_cast<std::uint8_t>(s[i]);
+      std::size_t adv = 1;
+      if ((b & 0x80) == 0x00) {
+        adv = 1;
+      } else if ((b & 0xE0) == 0xC0) {
+        adv = 2;
+      } else if ((b & 0xF0) == 0xE0) {
+        adv = 3;
+      } else if ((b & 0xF8) == 0xF0) {
+        adv = 4;
+      }
+      if (i + adv > s.size()) {
+        adv = 1;
+      }
+      i += adv;
+      ++n;
+    }
+    return n;
+  };
 
   auto rect_eq = [&](RectF a, RectF b) {
     return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
@@ -251,6 +302,51 @@ inline RenderTree build_render_tree(const std::vector<RenderOp> &ops,
               const float ox = v.rect.x + (v.rect.w - draw_w) * v.align_x;
               const float oy = v.rect.y + (v.rect.h - draw_h) * v.align_y;
 
+              if (v.sel_start >= 0 && v.sel_end >= 0 &&
+                  v.sel_start != v.sel_end) {
+                const auto len = utf8_len(v.text);
+                const auto a = std::max<std::int64_t>(
+                    0, std::min<std::int64_t>(v.sel_start, len));
+                const auto b = std::max<std::int64_t>(
+                    0, std::min<std::int64_t>(v.sel_end, len));
+                const auto s0 = std::min(a, b);
+                const auto s1 = std::max(a, b);
+                float x0 = ox;
+                float x1 = ox;
+                if (!layout.caret_x.empty()) {
+                  const auto last =
+                      static_cast<std::int64_t>(layout.caret_x.size()) - 1;
+                  const auto i0 =
+                      std::max<std::int64_t>(0, std::min(s0, last));
+                  const auto i1 =
+                      std::max<std::int64_t>(0, std::min(s1, last));
+                  x0 = ox + layout.caret_x[static_cast<std::size_t>(i0)] * scale;
+                  x1 = ox + layout.caret_x[static_cast<std::size_t>(i1)] * scale;
+                } else {
+                  const float p0 =
+                      len > 0 ? clampf(static_cast<float>(s0), 0.0f,
+                                       static_cast<float>(len)) /
+                                    static_cast<float>(len)
+                              : 0.0f;
+                  const float p1 =
+                      len > 0 ? clampf(static_cast<float>(s1), 0.0f,
+                                       static_cast<float>(len)) /
+                                    static_cast<float>(len)
+                              : 0.0f;
+                  x0 = ox + draw_w * p0;
+                  x1 = ox + draw_w * p1;
+                }
+
+                const float sel_h =
+                    std::min(v.rect.h, v.font_px * v.caret_h_factor * scale);
+                const float sel_y = oy + (draw_h - sel_h) * 0.5f;
+                auto &bsel = ensure_batch(RenderPipeline::Color, 0, sc);
+                push_quad(std::min(x0, x1), sel_y, std::max(x0, x1),
+                          sel_y + sel_h, 0.0f, 0.0f, 0.0f, 0.0f,
+                          pack_rgba(v.sel_color));
+                bsel.count += 6;
+              }
+
               const auto col = pack_rgba(v.color);
               for (const auto &q : layout.quads) {
                 auto &b = ensure_batch(RenderPipeline::Text, q.texture, sc);
@@ -262,8 +358,25 @@ inline RenderTree build_render_tree(const std::vector<RenderOp> &ops,
                 b.count += 6;
               }
 
-              if (v.caret_end) {
-                const float caret_x = ox + draw_w;
+              if (v.caret_end || v.caret_pos >= 0) {
+                float caret_x = ox + draw_w;
+                if (v.caret_pos >= 0) {
+                  if (!layout.caret_x.empty()) {
+                    const auto last =
+                        static_cast<std::int64_t>(layout.caret_x.size()) - 1;
+                    const auto idx = std::max<std::int64_t>(
+                        0, std::min<std::int64_t>(v.caret_pos, last));
+                    caret_x = ox + layout.caret_x[static_cast<std::size_t>(idx)] * scale;
+                  } else {
+                    const auto len = utf8_len(v.text);
+                    const auto p =
+                        len > 0 ? clampf(static_cast<float>(v.caret_pos), 0.0f,
+                                         static_cast<float>(len)) /
+                                      static_cast<float>(len)
+                                : 0.0f;
+                    caret_x = ox + draw_w * p;
+                  }
+                }
                 const float caret_h =
                     std::min(v.rect.h, v.font_px * v.caret_h_factor * scale);
                 const float caret_y = oy + (draw_h - caret_h) * 0.5f;
@@ -274,6 +387,17 @@ inline RenderTree build_render_tree(const std::vector<RenderOp> &ops,
                 b.count += 6;
               }
             } else if (v.caret_end) {
+              const float scale = 1.0f;
+              const float caret_h =
+                  std::min(v.rect.h, v.font_px * v.caret_h_factor * scale);
+              const float caret_y =
+                  v.rect.y + (v.rect.h - caret_h) * v.align_y;
+              const float caret_x = v.rect.x;
+              auto &b = ensure_batch(RenderPipeline::Color, 0, sc);
+              push_quad(caret_x, caret_y, caret_x + v.caret_w, caret_y + caret_h,
+                        0.0f, 0.0f, 0.0f, 0.0f, pack_rgba(v.caret_color));
+              b.count += 6;
+            } else if (v.caret_pos >= 0) {
               const float scale = 1.0f;
               const float caret_h =
                   std::min(v.rect.h, v.font_px * v.caret_h_factor * scale);

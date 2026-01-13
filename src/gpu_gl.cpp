@@ -340,6 +340,7 @@ struct GLTextEntry {
   int w{};
   int h{};
   std::vector<GLTextQuad> quads;
+  std::vector<float> caret_x;
 };
 
 static std::string duorou_readable_font_path() {
@@ -679,8 +680,13 @@ private:
 
     const int px = std::max(1, static_cast<int>(std::lround(font_px)));
 
-    std::vector<CachedGlyph> glyphs;
-    glyphs.reserve(text.size());
+    struct ShapedChar {
+      std::optional<CachedGlyph> glyph;
+      int advance{};
+    };
+
+    std::vector<ShapedChar> shaped;
+    shaped.reserve(text.size());
 
     int pen_x = 0;
     int max_top = 0;
@@ -693,25 +699,28 @@ private:
         break;
       }
 
-      const auto gi =
-          static_cast<std::uint32_t>(FT_Get_Char_Index(face_, (FT_ULong)cp));
+      auto gi = static_cast<std::uint32_t>(FT_Get_Char_Index(face_, (FT_ULong)cp));
       if (gi == 0) {
-        continue;
+        gi = static_cast<std::uint32_t>(FT_Get_Char_Index(face_, (FT_ULong)'?'));
       }
-      const auto *g = get_glyph(gi, px);
+      const auto *g = gi != 0 ? get_glyph(gi, px) : nullptr;
       if (!g) {
+        const int adv = std::max(1, px / 2);
+        shaped.push_back(ShapedChar{std::nullopt, adv});
+        pen_x += adv;
         continue;
       }
-      glyphs.push_back(*g);
+      const int adv = std::max(0, g->advance);
+      shaped.push_back(ShapedChar{*g, adv});
 
       max_top = std::max(max_top, g->bitmap_top);
       const int bottom = g->h - g->bitmap_top;
       max_bottom = std::max(max_bottom, bottom);
 
-      pen_x += g->advance;
+      pen_x += adv;
     }
 
-    if (glyphs.empty()) {
+    if (shaped.empty()) {
       return false;
     }
 
@@ -719,27 +728,33 @@ private:
     out.w = std::max(1, pen_x + pad * 2);
     out.h = std::max(1, max_top + max_bottom + pad * 2);
     out.quads.clear();
-    out.quads.reserve(glyphs.size());
+    out.caret_x.clear();
+    out.caret_x.reserve(shaped.size() + 1);
 
     const int baseline = pad + max_top;
     int x = pad;
-    for (const auto &g : glyphs) {
-      const int dst_x0 = x + g.bitmap_left;
-      const int dst_y0 = baseline - g.bitmap_top;
-      if (g.w > 0 && g.h > 0) {
-        GLTextQuad q{};
-        q.x0 = static_cast<float>(dst_x0);
-        q.y0 = static_cast<float>(dst_y0);
-        q.x1 = static_cast<float>(dst_x0 + g.w);
-        q.y1 = static_cast<float>(dst_y0 + g.h);
-        q.u0 = g.u0;
-        q.v0 = g.v0;
-        q.u1 = g.u1;
-        q.v1 = g.v1;
-        q.texture = g.texture;
-        out.quads.push_back(q);
+    out.caret_x.push_back(static_cast<float>(x));
+    for (const auto &ch : shaped) {
+      if (ch.glyph) {
+        const auto &g = *ch.glyph;
+        const int dst_x0 = x + g.bitmap_left;
+        const int dst_y0 = baseline - g.bitmap_top;
+        if (g.w > 0 && g.h > 0) {
+          GLTextQuad q{};
+          q.x0 = static_cast<float>(dst_x0);
+          q.y0 = static_cast<float>(dst_y0);
+          q.x1 = static_cast<float>(dst_x0 + g.w);
+          q.y1 = static_cast<float>(dst_y0 + g.h);
+          q.u0 = g.u0;
+          q.v0 = g.v0;
+          q.u1 = g.u1;
+          q.v1 = g.v1;
+          q.texture = g.texture;
+          out.quads.push_back(q);
+        }
       }
-      x += g.advance;
+      x += ch.advance;
+      out.caret_x.push_back(static_cast<float>(x));
     }
 
     return true;
@@ -1160,6 +1175,93 @@ static void utf8_pop_back(std::string &s) {
   s.erase(i);
 }
 
+static std::int64_t utf8_count(std::string_view s) {
+  std::int64_t n = 0;
+  for (std::size_t i = 0; i < s.size();) {
+    const auto b = static_cast<std::uint8_t>(s[i]);
+    std::size_t adv = 1;
+    if ((b & 0x80) == 0x00) {
+      adv = 1;
+    } else if ((b & 0xE0) == 0xC0) {
+      adv = 2;
+    } else if ((b & 0xF0) == 0xE0) {
+      adv = 3;
+    } else if ((b & 0xF8) == 0xF0) {
+      adv = 4;
+    }
+    if (i + adv > s.size()) {
+      adv = 1;
+    }
+    i += adv;
+    ++n;
+  }
+  return n;
+}
+
+static std::size_t utf8_byte_offset_from_char(std::string_view s,
+                                              std::int64_t char_index) {
+  if (char_index <= 0) {
+    return 0;
+  }
+  std::int64_t n = 0;
+  std::size_t i = 0;
+  while (i < s.size() && n < char_index) {
+    const auto b = static_cast<std::uint8_t>(s[i]);
+    std::size_t adv = 1;
+    if ((b & 0x80) == 0x00) {
+      adv = 1;
+    } else if ((b & 0xE0) == 0xC0) {
+      adv = 2;
+    } else if ((b & 0xF0) == 0xE0) {
+      adv = 3;
+    } else if ((b & 0xF8) == 0xF0) {
+      adv = 4;
+    }
+    if (i + adv > s.size()) {
+      adv = 1;
+    }
+    i += adv;
+    ++n;
+  }
+  return i;
+}
+
+static void utf8_erase_prev_char(std::string &s, std::int64_t &caret) {
+  const auto len = ::utf8_count(s);
+  caret = std::max<std::int64_t>(0, std::min(caret, len));
+  if (caret <= 0) {
+    return;
+  }
+  const auto end = ::utf8_byte_offset_from_char(s, caret);
+  const auto start = ::utf8_byte_offset_from_char(s, caret - 1);
+  if (start <= end && end <= s.size()) {
+    s.erase(start, end - start);
+    --caret;
+  }
+}
+
+static void utf8_insert_at_char(std::string &s, std::int64_t &caret,
+                                std::string_view insert) {
+  const auto len = ::utf8_count(s);
+  caret = std::max<std::int64_t>(0, std::min(caret, len));
+  const auto pos = ::utf8_byte_offset_from_char(s, caret);
+  s.insert(pos, insert);
+  caret += ::utf8_count(insert);
+}
+
+static void utf8_erase_at_char(std::string &s, std::int64_t caret) {
+  const auto len = ::utf8_count(s);
+  caret = std::max<std::int64_t>(0, std::min(caret, len));
+  if (caret >= len) {
+    return;
+  }
+  const auto start = ::utf8_byte_offset_from_char(s, caret);
+  const auto end = ::utf8_byte_offset_from_char(s, caret + 1);
+  if (start <= end && end <= s.size()) {
+    s.erase(start, end - start);
+  }
+}
+
 static void cursor_pos_cb(GLFWwindow *win, double xpos, double ypos) {
   auto *ctx = static_cast<InputCtx *>(glfwGetWindowUserPointer(win));
   if (!ctx || !ctx->app) {
@@ -1284,6 +1386,22 @@ int main() {
   auto slider = state<double>(0.35);
   auto field = state<std::string>(std::string{});
   auto field_focused = state<bool>(false);
+  auto field_caret = state<std::int64_t>(0);
+  auto progress = state<double>(0.25);
+  auto stepper_value = state<double>(3.0);
+  auto secure_value = state<std::string>(std::string{});
+  auto secure_focused = state<bool>(false);
+  auto secure_caret = state<std::int64_t>(0);
+  auto editor_value = state<std::string>(std::string{"Multi-line text editor"});
+  auto editor_focused = state<bool>(false);
+  auto editor_caret = state<std::int64_t>(0);
+  auto bind_field_value =
+      state<std::string>(std::string{"Drag to select (Binding TextField)"});
+  auto bind_secure_value = state<std::string>(std::string{"secret"});
+  auto bind_editor_value = state<std::string>(
+      std::string{"Drag to select (Binding TextEditor)\nSecond line\nThird line"});
+
+  GLTextCache text_cache;
 
   ViewInstance app{[&]() {
     auto slider_set_from_pointer = [slider]() mutable {
@@ -1408,31 +1526,444 @@ int main() {
                 .build(),
 
             view("Text")
+                .prop("value",
+                      std::string{"ProgressView: "} +
+                          std::to_string(static_cast<int>(progress.get() * 100.0)) +
+                          "%")
+                .build(),
+            view("Row")
+                .prop("spacing", 10.0)
+                .prop("cross_align", "center")
+                .children({
+                    view("ProgressView")
+                        .prop("value", progress.get())
+                        .prop("width", 220.0)
+                        .prop("height", 10.0)
+                        .build(),
+                    view("Button")
+                        .prop("title", "+10%")
+                        .event("pointer_up", on_pointer_up([progress]() mutable {
+                                 progress.set(std::min(1.0, progress.get() + 0.1));
+                               }))
+                        .build(),
+                })
+                .build(),
+
+            view("Text")
+                .prop("value", std::string{"Stepper: "} +
+                                   std::to_string(static_cast<int>(stepper_value.get())))
+                .build(),
+            view("Stepper")
+                .prop("value", stepper_value.get())
+                .prop("width", 160.0)
+                .event("pointer_up", on_pointer_up([stepper_value]() mutable {
+                         auto r = target_frame();
+                         if (!r || !(r->w > 0.0f)) {
+                           return;
+                         }
+                         const float local_x = pointer_x() - r->x;
+                         const bool inc = local_x > r->w * 0.5f;
+                         const double next =
+                             stepper_value.get() + (inc ? 1.0 : -1.0);
+                         stepper_value.set(std::max(0.0, next));
+                       }))
+                .build(),
+
+            view("Text")
                 .prop("value", std::string{"TextField: "} + field.get())
                 .build(),
             view("TextField")
                 .key("tf")
                 .prop("value", field.get())
+                .prop("caret", field_caret.get())
                 .prop("placeholder", "Type here (click to focus)")
                 .prop("focused", field_focused.get())
-                .event("focus", on_focus([field_focused]() mutable {
+                .event("focus", on_focus([field_focused, field, field_caret]() mutable {
                          field_focused.set(true);
+                         field_caret.set(::utf8_count(field.get()));
                        }))
                 .event("blur", on_blur([field_focused]() mutable {
                          field_focused.set(false);
                        }))
-                .event("key_down", on_key_down([field]() mutable {
-                         if (key_code() == GLFW_KEY_BACKSPACE) {
-                           auto s = field.get();
-                           utf8_pop_back(s);
+                .event("pointer_down", on_pointer_down([field, field_caret, &text_cache]() mutable {
+                         auto r = target_frame();
+                         if (!r) {
+                           return;
+                         }
+                         const float padding = 10.0f;
+                         const float font_px = 16.0f;
+                         const float local_x = pointer_x() - (r->x + padding);
+                         const float target_w = std::max(0.0f, r->w - padding * 2.0f);
+                         const float target_h = std::max(0.0f, r->h);
+
+                         const auto text = field.get();
+                         const auto len = ::utf8_count(text);
+                         if (len <= 0) {
+                           field_caret.set(0);
+                           return;
+                         }
+
+                         const auto *entry = text_cache.get(text, font_px);
+                         if (!entry || entry->caret_x.empty() || !(entry->w > 0) ||
+                             !(entry->h > 0)) {
+                           const float char_w = font_px * 0.5f;
+                           auto pos = static_cast<std::int64_t>(
+                               std::round(char_w > 0.0f ? (local_x / char_w)
+                                                        : 0.0f));
+                           pos = std::max<std::int64_t>(0, std::min(pos, len));
+                           field_caret.set(pos);
+                           return;
+                         }
+
+                         const float scale =
+                             std::min(target_w / static_cast<float>(entry->w),
+                                      target_h / static_cast<float>(entry->h));
+                         if (!(scale > 0.0f)) {
+                           field_caret.set(len);
+                           return;
+                         }
+
+                         const float lx = local_x / scale;
+                         const auto &cx = entry->caret_x;
+                         auto it = std::lower_bound(cx.begin(), cx.end(), lx);
+                         auto idx = static_cast<std::int64_t>(it - cx.begin());
+                         const auto last =
+                             static_cast<std::int64_t>(cx.size()) - 1;
+                         idx = std::max<std::int64_t>(0, std::min(idx, last));
+                         field_caret.set(idx);
+                       }))
+                .event("key_down", on_key_down([field, field_caret]() mutable {
+                         auto caret = field_caret.get();
+                         auto s = field.get();
+                         const auto len = ::utf8_count(s);
+                         caret = std::max<std::int64_t>(0, std::min(caret, len));
+
+                         if (key_code() == GLFW_KEY_LEFT) {
+                           caret = std::max<std::int64_t>(0, caret - 1);
+                         } else if (key_code() == GLFW_KEY_RIGHT) {
+                           caret = std::min<std::int64_t>(len, caret + 1);
+                         } else if (key_code() == GLFW_KEY_HOME) {
+                           caret = 0;
+                         } else if (key_code() == GLFW_KEY_END) {
+                           caret = len;
+                         } else if (key_code() == GLFW_KEY_BACKSPACE) {
+                           ::utf8_erase_prev_char(s, caret);
+                           field.set(std::move(s));
+                         } else if (key_code() == GLFW_KEY_DELETE) {
+                           ::utf8_erase_at_char(s, caret);
                            field.set(std::move(s));
                          }
+
+                         field_caret.set(caret);
                        }))
-                .event("text_input", on_text_input([field]() mutable {
+                .event("text_input", on_text_input([field, field_caret]() mutable {
+                         auto caret = field_caret.get();
                          auto s = field.get();
-                         s.append(text_input());
+                         ::utf8_insert_at_char(s, caret, text_input());
                          field.set(std::move(s));
+                         field_caret.set(caret);
                        }))
+                .build(),
+
+            view("Text")
+                .prop("value", std::string{"SecureField: "} + secure_value.get())
+                .build(),
+            view("TextField")
+                .key("sf")
+                .prop("secure", true)
+                .prop("value", secure_value.get())
+                .prop("caret", secure_caret.get())
+                .prop("placeholder", "Password")
+                .prop("focused", secure_focused.get())
+                .event("focus", on_focus([secure_focused, secure_value, secure_caret]() mutable {
+                         secure_focused.set(true);
+                         secure_caret.set(::utf8_count(secure_value.get()));
+                       }))
+                .event("blur", on_blur([secure_focused]() mutable {
+                         secure_focused.set(false);
+                       }))
+                .event("pointer_down", on_pointer_down([secure_value, secure_caret, &text_cache]() mutable {
+                         auto r = target_frame();
+                         if (!r) {
+                           return;
+                         }
+                         const float padding = 10.0f;
+                         const float font_px = 16.0f;
+                         const float local_x = pointer_x() - (r->x + padding);
+                         const float target_w = std::max(0.0f, r->w - padding * 2.0f);
+                         const float target_h = std::max(0.0f, r->h);
+
+                         const auto raw = secure_value.get();
+                         const auto len = ::utf8_count(raw);
+                         if (len <= 0) {
+                           secure_caret.set(0);
+                           return;
+                         }
+
+                         std::string masked;
+                         masked.assign(static_cast<std::size_t>(len), '*');
+                         const auto *entry = text_cache.get(masked, font_px);
+                         if (!entry || entry->caret_x.empty() || !(entry->w > 0) ||
+                             !(entry->h > 0)) {
+                           const float char_w = font_px * 0.5f;
+                           auto pos = static_cast<std::int64_t>(
+                               std::round(char_w > 0.0f ? (local_x / char_w)
+                                                        : 0.0f));
+                           pos = std::max<std::int64_t>(0, std::min(pos, len));
+                           secure_caret.set(pos);
+                           return;
+                         }
+
+                         const float scale =
+                             std::min(target_w / static_cast<float>(entry->w),
+                                      target_h / static_cast<float>(entry->h));
+                         if (!(scale > 0.0f)) {
+                           secure_caret.set(len);
+                           return;
+                         }
+
+                         const float lx = local_x / scale;
+                         const auto &cx = entry->caret_x;
+                         auto it = std::lower_bound(cx.begin(), cx.end(), lx);
+                         auto idx = static_cast<std::int64_t>(it - cx.begin());
+                         const auto last =
+                             static_cast<std::int64_t>(cx.size()) - 1;
+                         idx = std::max<std::int64_t>(0, std::min(idx, last));
+                         secure_caret.set(idx);
+                       }))
+                .event("key_down", on_key_down([secure_value, secure_caret]() mutable {
+                         auto caret = secure_caret.get();
+                         auto s = secure_value.get();
+                         const auto len = ::utf8_count(s);
+                         caret = std::max<std::int64_t>(0, std::min(caret, len));
+
+                         if (key_code() == GLFW_KEY_LEFT) {
+                           caret = std::max<std::int64_t>(0, caret - 1);
+                         } else if (key_code() == GLFW_KEY_RIGHT) {
+                           caret = std::min<std::int64_t>(len, caret + 1);
+                         } else if (key_code() == GLFW_KEY_HOME) {
+                           caret = 0;
+                         } else if (key_code() == GLFW_KEY_END) {
+                           caret = len;
+                         } else if (key_code() == GLFW_KEY_BACKSPACE) {
+                           ::utf8_erase_prev_char(s, caret);
+                           secure_value.set(std::move(s));
+                         } else if (key_code() == GLFW_KEY_DELETE) {
+                           ::utf8_erase_at_char(s, caret);
+                           secure_value.set(std::move(s));
+                         }
+
+                         secure_caret.set(caret);
+                       }))
+                .event("text_input", on_text_input([secure_value, secure_caret]() mutable {
+                         auto caret = secure_caret.get();
+                         auto s = secure_value.get();
+                         ::utf8_insert_at_char(s, caret, text_input());
+                         secure_value.set(std::move(s));
+                         secure_caret.set(caret);
+                       }))
+                .build(),
+
+            view("Text")
+                .prop("value", "TextEditor:")
+                .build(),
+            view("TextEditor")
+                .key("te")
+                .prop("value", editor_value.get())
+                .prop("focused", editor_focused.get())
+                .prop("caret", editor_caret.get())
+                .prop("width", 360.0)
+                .prop("height", 110.0)
+                .event("focus", on_focus([editor_focused, editor_value, editor_caret]() mutable {
+                         editor_focused.set(true);
+                         editor_caret.set(::utf8_count(editor_value.get()));
+                       }))
+                .event("blur", on_blur([editor_focused]() mutable {
+                         editor_focused.set(false);
+                       }))
+                .event("pointer_down", on_pointer_down([editor_value, editor_caret, &text_cache]() mutable {
+                         auto r = target_frame();
+                         if (!r) {
+                           return;
+                         }
+                         const float padding = 10.0f;
+                         const float font_px = 16.0f;
+                         const float line_h = font_px * 1.2f;
+
+                         const float local_x = pointer_x() - (r->x + padding);
+                         const float local_y = pointer_y() - (r->y + padding);
+                         const std::int64_t row = static_cast<std::int64_t>(
+                             std::max(0.0f, std::floor(line_h > 0.0f ? (local_y / line_h)
+                                                                  : 0.0f)));
+                         const float target_w = std::max(0.0f, r->w - padding * 2.0f);
+                         const float target_h = std::max(0.0f, line_h);
+
+                         const auto text = editor_value.get();
+                         struct LineInfo {
+                           std::string_view text;
+                           std::int64_t start{};
+                           std::int64_t len{};
+                         };
+                         std::vector<LineInfo> lines;
+                         lines.reserve(8);
+                         {
+                           std::size_t start_b = 0;
+                           std::int64_t start_c = 0;
+                           for (std::size_t i = 0; i <= text.size(); ++i) {
+                             if (i == text.size() || text[i] == '\n') {
+                                auto sv = std::string_view{text}.substr(start_b, i - start_b);
+                               const auto len_c = ::utf8_count(sv);
+                               lines.push_back(LineInfo{sv, start_c, len_c});
+                               start_b = i + 1;
+                               start_c += len_c + 1;
+                              }
+                            }
+                            if (lines.empty()) {
+                              lines.push_back(LineInfo{std::string_view{}, 0, 0});
+                            }
+                          }
+
+                         const auto idx =
+                             static_cast<std::size_t>(std::min<std::int64_t>(
+                                 row, static_cast<std::int64_t>(lines.size() - 1)));
+                         const auto &line = lines[idx];
+                         std::int64_t col = 0;
+                         if (!line.text.empty()) {
+                           const auto *entry = text_cache.get(line.text, font_px);
+                           if (entry && !entry->caret_x.empty() && entry->w > 0 &&
+                               entry->h > 0) {
+                             const float scale = std::min(
+                                 target_w / static_cast<float>(entry->w),
+                                 target_h / static_cast<float>(entry->h));
+                             if (scale > 0.0f) {
+                               const float lx = local_x / scale;
+                               const auto &cx = entry->caret_x;
+                               auto it = std::lower_bound(cx.begin(), cx.end(), lx);
+                               col = static_cast<std::int64_t>(it - cx.begin());
+                               const auto last =
+                                   static_cast<std::int64_t>(cx.size()) - 1;
+                               col = std::max<std::int64_t>(0, std::min(col, last));
+                             }
+                           } else {
+                             const float char_w = font_px * 0.5f;
+                             col = static_cast<std::int64_t>(std::max(
+                                 0.0f, std::round(char_w > 0.0f ? (local_x / char_w)
+                                                               : 0.0f)));
+                           }
+                         }
+                         col = std::max<std::int64_t>(0, std::min(col, line.len));
+                         const auto pos = line.start + col;
+                         editor_caret.set(pos);
+                       }))
+                .event("key_down", on_key_down([editor_value, editor_caret]() mutable {
+                         auto caret = editor_caret.get();
+                         auto s = editor_value.get();
+
+                         struct LineInfo {
+                           std::int64_t start{};
+                           std::int64_t len{};
+                         };
+                         std::vector<LineInfo> lines;
+                         lines.reserve(8);
+                         {
+                           std::size_t start_b = 0;
+                           std::int64_t start_c = 0;
+                           for (std::size_t i = 0; i <= s.size(); ++i) {
+                             if (i == s.size() || s[i] == '\n') {
+                               auto sv =
+                                   std::string_view{s}.substr(start_b, i - start_b);
+                              const auto len_c = ::utf8_count(sv);
+                              lines.push_back(LineInfo{start_c, len_c});
+                              start_b = i + 1;
+                              start_c += len_c + 1;
+                             }
+                           }
+                           if (lines.empty()) {
+                             lines.push_back(LineInfo{0, 0});
+                           }
+                         }
+
+                         const auto total_len = ::utf8_count(s);
+                         caret = std::max<std::int64_t>(0, std::min(caret, total_len));
+
+                         std::size_t line_idx = 0;
+                         for (std::size_t i = 0; i < lines.size(); ++i) {
+                           if (caret <= lines[i].start + lines[i].len) {
+                             line_idx = i;
+                             break;
+                           }
+                           line_idx = i;
+                         }
+                         const std::int64_t col = caret - lines[line_idx].start;
+
+                         if (key_code() == GLFW_KEY_LEFT) {
+                           caret = std::max<std::int64_t>(0, caret - 1);
+                         } else if (key_code() == GLFW_KEY_RIGHT) {
+                           caret = std::min<std::int64_t>(total_len, caret + 1);
+                         } else if (key_code() == GLFW_KEY_HOME) {
+                           caret = lines[line_idx].start;
+                         } else if (key_code() == GLFW_KEY_END) {
+                           caret = lines[line_idx].start + lines[line_idx].len;
+                         } else if (key_code() == GLFW_KEY_UP) {
+                           if (line_idx > 0) {
+                             const auto prev = lines[line_idx - 1];
+                             caret = prev.start + std::min(col, prev.len);
+                           }
+                         } else if (key_code() == GLFW_KEY_DOWN) {
+                           if (line_idx + 1 < lines.size()) {
+                             const auto next = lines[line_idx + 1];
+                             caret = next.start + std::min(col, next.len);
+                           }
+                         } else if (key_code() == GLFW_KEY_BACKSPACE) {
+                           ::utf8_erase_prev_char(s, caret);
+                           editor_value.set(std::move(s));
+                         } else if (key_code() == GLFW_KEY_DELETE) {
+                           ::utf8_erase_at_char(s, caret);
+                           editor_value.set(std::move(s));
+                         } else if (key_code() == GLFW_KEY_ENTER ||
+                                    key_code() == GLFW_KEY_KP_ENTER) {
+                           ::utf8_insert_at_char(s, caret, "\n");
+                           editor_value.set(std::move(s));
+                         }
+
+                         editor_caret.set(caret);
+                       }))
+                .event("text_input", on_text_input([editor_value, editor_caret]() mutable {
+                         auto caret = editor_caret.get();
+                         auto s = editor_value.get();
+                         ::utf8_insert_at_char(s, caret, text_input());
+                         editor_value.set(std::move(s));
+                         editor_caret.set(caret);
+                       }))
+                .build(),
+
+            view("Divider").prop("thickness", 1.0).prop("color", 0xFF3A3A3A).build(),
+
+            view("Text")
+                .prop("value", "TextField (Binding, drag to select):")
+                .build(),
+            view("TextField")
+                .key("tf_bind")
+                .prop("binding", duorou::ui::bind(bind_field_value))
+                .prop("placeholder", "Type here")
+                .build(),
+
+            view("Text").prop("value", "SecureField (Binding):").build(),
+            view("TextField")
+                .key("sf_bind")
+                .prop("secure", true)
+                .prop("binding", duorou::ui::bind(bind_secure_value))
+                .prop("placeholder", "Password")
+                .build(),
+
+            view("Text")
+                .prop("value", "TextEditor (Binding, drag to select):")
+                .build(),
+            view("TextEditor")
+                .key("te_bind")
+                .prop("binding", duorou::ui::bind(bind_editor_value))
+                .prop("width", 360.0)
+                .prop("height", 110.0)
                 .build(),
 
             view("Divider").prop("thickness", 1.0).prop("color", 0xFF3A3A3A).build(),
@@ -1497,13 +2028,13 @@ int main() {
   glfwSetCharCallback(win, char_cb);
 
   {
-    GLTextCache text_cache;
     struct GLTextProvider final : TextProvider {
       GLTextCache *cache{};
 
       bool layout_text(std::string_view text, float font_px,
                        TextLayout &out) override {
         out.quads.clear();
+        out.caret_x.clear();
         if (!cache) {
           return false;
         }
@@ -1527,6 +2058,7 @@ int main() {
           tq.texture = static_cast<TextureHandle>(q.texture);
           out.quads.push_back(tq);
         }
+        out.caret_x = e->caret_x;
         return true;
       }
     };

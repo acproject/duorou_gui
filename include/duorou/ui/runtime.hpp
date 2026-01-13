@@ -63,6 +63,7 @@ private:
 
 class StateBase {
 public:
+  virtual ~StateBase() = default;
   using Callback = std::function<void()>;
 
   std::uint64_t version() const noexcept {
@@ -166,6 +167,7 @@ struct EventDispatchContext {
 };
 
 inline thread_local EventDispatchContext *active_dispatch_context = nullptr;
+inline thread_local ViewInstance *active_build_instance = nullptr;
 
 } // namespace detail
 
@@ -298,6 +300,151 @@ private:
 
 template <typename T> StateHandle<T> state(T initial) {
   return StateHandle<T>{std::make_shared<State<T>>(std::move(initial))};
+}
+
+inline BindingId bind(const StateHandle<std::string> &h) {
+  const auto p = reinterpret_cast<std::intptr_t>(h.base());
+  return BindingId{static_cast<std::int64_t>(p)};
+}
+
+inline std::string binding_get(BindingId id) {
+  if (id.raw == 0) {
+    return {};
+  }
+  auto *base = reinterpret_cast<StateBase *>(static_cast<std::intptr_t>(id.raw));
+  auto *s = dynamic_cast<State<std::string> *>(base);
+  return s ? s->get() : std::string{};
+}
+
+inline void binding_set(BindingId id, std::string v) {
+  if (id.raw == 0) {
+    return;
+  }
+  auto *base = reinterpret_cast<StateBase *>(static_cast<std::intptr_t>(id.raw));
+  auto *s = dynamic_cast<State<std::string> *>(base);
+  if (!s) {
+    return;
+  }
+  s->set(std::move(v));
+}
+
+constexpr int KEY_SPACE = 32;
+constexpr int KEY_BACKSPACE = 259;
+constexpr int KEY_DELETE = 261;
+constexpr int KEY_ENTER = 257;
+constexpr int KEY_KP_ENTER = 335;
+constexpr int KEY_LEFT = 263;
+constexpr int KEY_RIGHT = 262;
+constexpr int KEY_UP = 265;
+constexpr int KEY_DOWN = 264;
+constexpr int KEY_HOME = 268;
+constexpr int KEY_END = 269;
+
+inline std::int64_t utf8_count(std::string_view s) {
+  std::int64_t n = 0;
+  for (std::size_t i = 0; i < s.size();) {
+    const auto b = static_cast<std::uint8_t>(s[i]);
+    std::size_t adv = 1;
+    if ((b & 0x80) == 0x00) {
+      adv = 1;
+    } else if ((b & 0xE0) == 0xC0) {
+      adv = 2;
+    } else if ((b & 0xF0) == 0xE0) {
+      adv = 3;
+    } else if ((b & 0xF8) == 0xF0) {
+      adv = 4;
+    }
+    if (i + adv > s.size()) {
+      adv = 1;
+    }
+    i += adv;
+    ++n;
+  }
+  return n;
+}
+
+inline std::size_t utf8_byte_offset_from_char(std::string_view s,
+                                              std::int64_t char_index) {
+  if (char_index <= 0) {
+    return 0;
+  }
+  std::int64_t n = 0;
+  std::size_t i = 0;
+  while (i < s.size() && n < char_index) {
+    const auto b = static_cast<std::uint8_t>(s[i]);
+    std::size_t adv = 1;
+    if ((b & 0x80) == 0x00) {
+      adv = 1;
+    } else if ((b & 0xE0) == 0xC0) {
+      adv = 2;
+    } else if ((b & 0xF0) == 0xE0) {
+      adv = 3;
+    } else if ((b & 0xF8) == 0xF0) {
+      adv = 4;
+    }
+    if (i + adv > s.size()) {
+      adv = 1;
+    }
+    i += adv;
+    ++n;
+  }
+  return i;
+}
+
+inline void utf8_erase_prev_char(std::string &s, std::int64_t &caret) {
+  const auto len = utf8_count(s);
+  caret = std::max<std::int64_t>(0, std::min(caret, len));
+  if (caret <= 0) {
+    return;
+  }
+  const auto end = utf8_byte_offset_from_char(s, caret);
+  const auto start = utf8_byte_offset_from_char(s, caret - 1);
+  if (start <= end && end <= s.size()) {
+    s.erase(start, end - start);
+    --caret;
+  }
+}
+
+inline void utf8_insert_at_char(std::string &s, std::int64_t &caret,
+                                std::string_view insert) {
+  const auto len = utf8_count(s);
+  caret = std::max<std::int64_t>(0, std::min(caret, len));
+  const auto pos = utf8_byte_offset_from_char(s, caret);
+  s.insert(pos, insert.data(), insert.size());
+  caret += utf8_count(insert);
+}
+
+inline void utf8_erase_at_char(std::string &s, std::int64_t caret) {
+  const auto len = utf8_count(s);
+  caret = std::max<std::int64_t>(0, std::min(caret, len));
+  if (caret >= len) {
+    return;
+  }
+  const auto start = utf8_byte_offset_from_char(s, caret);
+  const auto end = utf8_byte_offset_from_char(s, caret + 1);
+  if (start <= end && end <= s.size()) {
+    s.erase(start, end - start);
+  }
+}
+
+inline bool utf8_erase_range(std::string &s, std::int64_t &caret,
+                             std::int64_t a, std::int64_t b) {
+  const auto len = utf8_count(s);
+  a = std::max<std::int64_t>(0, std::min(a, len));
+  b = std::max<std::int64_t>(0, std::min(b, len));
+  const auto start_c = std::min(a, b);
+  const auto end_c = std::max(a, b);
+  if (end_c <= start_c) {
+    return false;
+  }
+  const auto start_b = utf8_byte_offset_from_char(s, start_c);
+  const auto end_b = utf8_byte_offset_from_char(s, end_c);
+  if (!(start_b <= end_b && end_b <= s.size())) {
+    return false;
+  }
+  s.erase(start_b, end_b - start_b);
+  caret = start_c;
+  return true;
 }
 
 struct PatchSetProp {
@@ -541,6 +688,18 @@ public:
     render_ops_ = build_render_ops(tree_, layout_);
   }
 
+  template <typename T> StateHandle<T> local_state(std::string key, T initial) {
+    const auto it = local_states_.find(key);
+    if (it != local_states_.end()) {
+      if (auto p = std::dynamic_pointer_cast<State<T>>(it->second)) {
+        return StateHandle<T>{std::move(p)};
+      }
+    }
+    auto p = std::make_shared<State<T>>(std::move(initial));
+    local_states_.insert_or_assign(std::move(key), p);
+    return StateHandle<T>{std::move(p)};
+  }
+
 private:
   struct CaptureTarget {
     std::vector<std::size_t> path;
@@ -627,6 +786,9 @@ private:
       return true;
     }
     if (v.type == "Button") {
+      return true;
+    }
+    if (v.type == "TextField" || v.type == "TextEditor") {
       return true;
     }
     if (const auto it = v.events.find("key_down");
@@ -1070,9 +1232,465 @@ private:
     detail::DependencyCollector collector;
     detail::active_collector = &collector;
     detail::active_event_collector = &event_collector;
+    detail::active_build_instance = this;
     auto new_tree = fn_();
+
+    auto apply_text_bindings = [&](auto &&self, ViewNode &node) -> void {
+      for (auto &ch : node.children) {
+        self(self, ch);
+      }
+
+      if (node.type != "TextField" && node.type != "TextEditor") {
+        return;
+      }
+
+      auto binding_raw = prop_as_i64_opt(node.props, "binding");
+      if (!binding_raw) {
+        binding_raw = prop_as_i64_opt(node.props, "value");
+      }
+      if (!binding_raw || *binding_raw == 0) {
+        return;
+      }
+
+      const BindingId binding{*binding_raw};
+
+      std::string state_key = node.key;
+      if (state_key.empty()) {
+        state_key = std::string{"node:"} + std::to_string(node.id);
+      }
+
+      auto focused = local_state<bool>(state_key + ":focused", false);
+      auto caret = local_state<std::int64_t>(state_key + ":caret", 0);
+      auto sel_anchor = local_state<std::int64_t>(state_key + ":sel_anchor", 0);
+      auto sel_end = local_state<std::int64_t>(state_key + ":sel_end", 0);
+
+      const auto padding = prop_as_float(node.props, "padding", 10.0f);
+      const auto font_px = prop_as_float(node.props, "font_size", 16.0f);
+
+      {
+        auto s = binding_get(binding);
+        node.props.insert_or_assign("value", PropValue{s});
+        node.props.insert_or_assign("focused", PropValue{focused.get()});
+        node.props.insert_or_assign("caret", PropValue{caret.get()});
+        node.props.insert_or_assign("sel_start", PropValue{sel_anchor.get()});
+        node.props.insert_or_assign("sel_end", PropValue{sel_end.get()});
+      }
+
+      if (auto it = node.events.find("focus");
+          it == node.events.end() || it->second == 0) {
+        node.events.insert_or_assign(
+            "focus", event_collector.add([focused, caret, sel_anchor, sel_end,
+                                          binding]() mutable {
+              focused.set(true);
+              const auto next = utf8_count(binding_get(binding));
+              caret.set(next);
+              sel_anchor.set(next);
+              sel_end.set(next);
+            }));
+      }
+      if (auto it = node.events.find("blur");
+          it == node.events.end() || it->second == 0) {
+        node.events.insert_or_assign(
+            "blur", event_collector.add([focused]() mutable { focused.set(false); }));
+      }
+
+      if (auto it = node.events.find("pointer_down");
+          it == node.events.end() || it->second == 0) {
+        if (node.type == "TextField") {
+          node.events.insert_or_assign(
+              "pointer_down",
+              event_collector.add([caret, sel_anchor, sel_end, binding, padding,
+                                   font_px]() mutable {
+                auto r = target_frame();
+                if (!r) {
+                  return;
+                }
+                const float char_w = font_px * 0.5f;
+                const float local_x = pointer_x() - (r->x + padding);
+                const auto len = utf8_count(binding_get(binding));
+                auto pos = static_cast<std::int64_t>(
+                    std::round(char_w > 0.0f ? (local_x / char_w) : 0.0f));
+                pos = std::max<std::int64_t>(0, std::min(pos, len));
+                caret.set(pos);
+                sel_anchor.set(pos);
+                sel_end.set(pos);
+                capture_pointer();
+              }));
+        } else {
+          node.events.insert_or_assign(
+              "pointer_down",
+              event_collector.add([caret, sel_anchor, sel_end, binding, padding,
+                                   font_px]() mutable {
+                auto r = target_frame();
+                if (!r) {
+                  return;
+                }
+                const float char_w = font_px * 0.5f;
+                const float line_h = font_px * 1.2f;
+
+                const float local_x = pointer_x() - (r->x + padding);
+                const float local_y = pointer_y() - (r->y + padding);
+                const std::int64_t col = static_cast<std::int64_t>(
+                    std::max(0.0f, std::round(char_w > 0.0f ? (local_x / char_w)
+                                                           : 0.0f)));
+                const std::int64_t row = static_cast<std::int64_t>(
+                    std::max(0.0f, std::floor(line_h > 0.0f ? (local_y / line_h)
+                                                           : 0.0f)));
+
+                auto s = binding_get(binding);
+                struct Line {
+                  std::int64_t start{};
+                  std::int64_t len{};
+                };
+                std::vector<Line> lines;
+                lines.reserve(8);
+                {
+                  std::int64_t start = 0;
+                  std::int64_t cur = 0;
+                  for (std::size_t i = 0; i < s.size();) {
+                    if (s[i] == '\n') {
+                      lines.push_back(Line{start, cur - start});
+                      ++cur;
+                      ++i;
+                      start = cur;
+                      continue;
+                    }
+                    const auto b0 = static_cast<std::uint8_t>(s[i]);
+                    std::size_t adv = 1;
+                    if ((b0 & 0x80) == 0x00) {
+                      adv = 1;
+                    } else if ((b0 & 0xE0) == 0xC0) {
+                      adv = 2;
+                    } else if ((b0 & 0xF0) == 0xE0) {
+                      adv = 3;
+                    } else if ((b0 & 0xF8) == 0xF0) {
+                      adv = 4;
+                    }
+                    if (i + adv > s.size()) {
+                      adv = 1;
+                    }
+                    i += adv;
+                    ++cur;
+                  }
+                  lines.push_back(Line{start, cur - start});
+                }
+
+                const auto total_len = utf8_count(s);
+                const auto rrow = std::max<std::int64_t>(
+                    0, std::min<std::int64_t>(row,
+                                              static_cast<std::int64_t>(lines.size()) -
+                                                  1));
+                const auto line_start = lines[static_cast<std::size_t>(rrow)].start;
+                const auto line_len = lines[static_cast<std::size_t>(rrow)].len;
+                const auto next = line_start + std::min(col, line_len);
+                const auto pos =
+                    std::max<std::int64_t>(0, std::min(next, total_len));
+                caret.set(pos);
+                sel_anchor.set(pos);
+                sel_end.set(pos);
+                capture_pointer();
+              }));
+        }
+      }
+
+      if (auto it = node.events.find("pointer_move");
+          it == node.events.end() || it->second == 0) {
+        if (node.type == "TextField") {
+          node.events.insert_or_assign(
+              "pointer_move",
+              event_collector.add([caret, sel_end, binding, padding,
+                                   font_px]() mutable {
+                auto r = target_frame();
+                if (!r) {
+                  return;
+                }
+                const float char_w = font_px * 0.5f;
+                const float local_x = pointer_x() - (r->x + padding);
+                const auto len = utf8_count(binding_get(binding));
+                auto pos = static_cast<std::int64_t>(
+                    std::round(char_w > 0.0f ? (local_x / char_w) : 0.0f));
+                pos = std::max<std::int64_t>(0, std::min(pos, len));
+                caret.set(pos);
+                sel_end.set(pos);
+              }));
+        } else {
+          node.events.insert_or_assign(
+              "pointer_move",
+              event_collector.add([caret, sel_end, binding, padding,
+                                   font_px]() mutable {
+                auto r = target_frame();
+                if (!r) {
+                  return;
+                }
+                const float char_w = font_px * 0.5f;
+                const float line_h = font_px * 1.2f;
+
+                const float local_x = pointer_x() - (r->x + padding);
+                const float local_y = pointer_y() - (r->y + padding);
+                const std::int64_t col = static_cast<std::int64_t>(
+                    std::max(0.0f, std::round(char_w > 0.0f ? (local_x / char_w)
+                                                           : 0.0f)));
+                const std::int64_t row = static_cast<std::int64_t>(
+                    std::max(0.0f, std::floor(line_h > 0.0f ? (local_y / line_h)
+                                                           : 0.0f)));
+
+                auto s = binding_get(binding);
+                struct Line {
+                  std::int64_t start{};
+                  std::int64_t len{};
+                };
+                std::vector<Line> lines;
+                lines.reserve(8);
+                {
+                  std::int64_t start = 0;
+                  std::int64_t cur = 0;
+                  for (std::size_t i = 0; i < s.size();) {
+                    if (s[i] == '\n') {
+                      lines.push_back(Line{start, cur - start});
+                      ++cur;
+                      ++i;
+                      start = cur;
+                      continue;
+                    }
+                    const auto b0 = static_cast<std::uint8_t>(s[i]);
+                    std::size_t adv = 1;
+                    if ((b0 & 0x80) == 0x00) {
+                      adv = 1;
+                    } else if ((b0 & 0xE0) == 0xC0) {
+                      adv = 2;
+                    } else if ((b0 & 0xF0) == 0xE0) {
+                      adv = 3;
+                    } else if ((b0 & 0xF8) == 0xF0) {
+                      adv = 4;
+                    }
+                    if (i + adv > s.size()) {
+                      adv = 1;
+                    }
+                    i += adv;
+                    ++cur;
+                  }
+                  lines.push_back(Line{start, cur - start});
+                }
+
+                const auto total_len = utf8_count(s);
+                const auto rrow = std::max<std::int64_t>(
+                    0, std::min<std::int64_t>(row,
+                                              static_cast<std::int64_t>(lines.size()) -
+                                                  1));
+                const auto line_start = lines[static_cast<std::size_t>(rrow)].start;
+                const auto line_len = lines[static_cast<std::size_t>(rrow)].len;
+                const auto next = line_start + std::min(col, line_len);
+                const auto pos =
+                    std::max<std::int64_t>(0, std::min(next, total_len));
+                caret.set(pos);
+                sel_end.set(pos);
+              }));
+        }
+      }
+
+      if (auto it = node.events.find("pointer_up");
+          it == node.events.end() || it->second == 0) {
+        node.events.insert_or_assign(
+            "pointer_up", event_collector.add([]() mutable { release_pointer(); }));
+      }
+
+      if (auto it = node.events.find("key_down");
+          it == node.events.end() || it->second == 0) {
+        if (node.type == "TextField") {
+          node.events.insert_or_assign(
+              "key_down",
+              event_collector.add([binding, caret, sel_anchor, sel_end]() mutable {
+                auto c = caret.get();
+                auto a = sel_anchor.get();
+                auto b = sel_end.get();
+                auto s = binding_get(binding);
+                const auto len = utf8_count(s);
+                c = std::max<std::int64_t>(0, std::min(c, len));
+                a = std::max<std::int64_t>(0, std::min(a, len));
+                b = std::max<std::int64_t>(0, std::min(b, len));
+
+                if (key_code() == KEY_LEFT) {
+                  c = std::max<std::int64_t>(0, c - 1);
+                } else if (key_code() == KEY_RIGHT) {
+                  c = std::min<std::int64_t>(len, c + 1);
+                } else if (key_code() == KEY_HOME) {
+                  c = 0;
+                } else if (key_code() == KEY_END) {
+                  c = len;
+                } else if (key_code() == KEY_BACKSPACE) {
+                  if (a != b) {
+                    if (utf8_erase_range(s, c, a, b)) {
+                      binding_set(binding, std::move(s));
+                      a = c;
+                      b = c;
+                    }
+                  } else {
+                    utf8_erase_prev_char(s, c);
+                    binding_set(binding, std::move(s));
+                  }
+                } else if (key_code() == KEY_DELETE) {
+                  if (a != b) {
+                    if (utf8_erase_range(s, c, a, b)) {
+                      binding_set(binding, std::move(s));
+                      a = c;
+                      b = c;
+                    }
+                  } else {
+                    utf8_erase_at_char(s, c);
+                    binding_set(binding, std::move(s));
+                  }
+                }
+
+                caret.set(c);
+                sel_anchor.set(c);
+                sel_end.set(c);
+              }));
+        } else {
+          node.events.insert_or_assign(
+              "key_down",
+              event_collector.add([binding, caret, sel_anchor, sel_end]() mutable {
+                auto c = caret.get();
+                auto a = sel_anchor.get();
+                auto b = sel_end.get();
+                auto s = binding_get(binding);
+                const auto total_len = utf8_count(s);
+                c = std::max<std::int64_t>(0, std::min(c, total_len));
+                a = std::max<std::int64_t>(0, std::min(a, total_len));
+                b = std::max<std::int64_t>(0, std::min(b, total_len));
+
+                struct Line {
+                  std::int64_t start{};
+                  std::int64_t len{};
+                };
+                std::vector<Line> lines;
+                lines.reserve(8);
+                {
+                  std::int64_t start = 0;
+                  std::int64_t cur = 0;
+                  for (std::size_t i = 0; i < s.size();) {
+                    if (s[i] == '\n') {
+                      lines.push_back(Line{start, cur - start});
+                      ++cur;
+                      ++i;
+                      start = cur;
+                      continue;
+                    }
+                    const auto b0 = static_cast<std::uint8_t>(s[i]);
+                    std::size_t adv = 1;
+                    if ((b0 & 0x80) == 0x00) {
+                      adv = 1;
+                    } else if ((b0 & 0xE0) == 0xC0) {
+                      adv = 2;
+                    } else if ((b0 & 0xF0) == 0xE0) {
+                      adv = 3;
+                    } else if ((b0 & 0xF8) == 0xF0) {
+                      adv = 4;
+                    }
+                    if (i + adv > s.size()) {
+                      adv = 1;
+                    }
+                    i += adv;
+                    ++cur;
+                  }
+                  lines.push_back(Line{start, cur - start});
+                }
+
+                std::size_t line_idx = 0;
+                for (std::size_t i = 0; i < lines.size(); ++i) {
+                  if (c <= lines[i].start + lines[i].len) {
+                    line_idx = i;
+                    break;
+                  }
+                }
+                const std::int64_t col = c - lines[line_idx].start;
+
+                if (key_code() == KEY_LEFT) {
+                  c = std::max<std::int64_t>(0, c - 1);
+                } else if (key_code() == KEY_RIGHT) {
+                  c = std::min<std::int64_t>(total_len, c + 1);
+                } else if (key_code() == KEY_HOME) {
+                  c = lines[line_idx].start;
+                } else if (key_code() == KEY_END) {
+                  c = lines[line_idx].start + lines[line_idx].len;
+                } else if (key_code() == KEY_UP) {
+                  if (line_idx > 0) {
+                    const auto prev = lines[line_idx - 1];
+                    c = prev.start + std::min(col, prev.len);
+                  }
+                } else if (key_code() == KEY_DOWN) {
+                  if (line_idx + 1 < lines.size()) {
+                    const auto next = lines[line_idx + 1];
+                    c = next.start + std::min(col, next.len);
+                  }
+                } else if (key_code() == KEY_BACKSPACE) {
+                  if (a != b) {
+                    if (utf8_erase_range(s, c, a, b)) {
+                      binding_set(binding, std::move(s));
+                      a = c;
+                      b = c;
+                    }
+                  } else {
+                    utf8_erase_prev_char(s, c);
+                    binding_set(binding, std::move(s));
+                  }
+                } else if (key_code() == KEY_DELETE) {
+                  if (a != b) {
+                    if (utf8_erase_range(s, c, a, b)) {
+                      binding_set(binding, std::move(s));
+                      a = c;
+                      b = c;
+                    }
+                  } else {
+                    utf8_erase_at_char(s, c);
+                    binding_set(binding, std::move(s));
+                  }
+                } else if (key_code() == KEY_ENTER || key_code() == KEY_KP_ENTER) {
+                  if (a != b) {
+                    if (utf8_erase_range(s, c, a, b)) {
+                      a = c;
+                      b = c;
+                    }
+                  }
+                  utf8_insert_at_char(s, c, "\n");
+                  binding_set(binding, std::move(s));
+                }
+
+                caret.set(c);
+                sel_anchor.set(c);
+                sel_end.set(c);
+              }));
+        }
+      }
+
+      if (auto it = node.events.find("text_input");
+          it == node.events.end() || it->second == 0) {
+        node.events.insert_or_assign(
+            "text_input",
+            event_collector.add([binding, caret, sel_anchor, sel_end]() mutable {
+              auto c = caret.get();
+              auto a = sel_anchor.get();
+              auto b = sel_end.get();
+              auto s = binding_get(binding);
+              if (a != b) {
+                if (utf8_erase_range(s, c, a, b)) {
+                  a = c;
+                  b = c;
+                }
+              }
+              utf8_insert_at_char(s, c, text_input());
+              binding_set(binding, std::move(s));
+              caret.set(c);
+              sel_anchor.set(c);
+              sel_end.set(c);
+            }));
+      }
+    };
+
+    apply_text_bindings(apply_text_bindings, new_tree);
+
     detail::active_collector = nullptr;
     detail::active_event_collector = nullptr;
+    detail::active_build_instance = nullptr;
 
     new_tree = normalize_root(flatten_groups(std::move(new_tree)));
     restore_scroll_offsets(new_tree);
@@ -1112,8 +1730,17 @@ private:
   std::unordered_map<std::string, double> scroll_offsets_{};
   std::unordered_map<int, ScrollDrag> scroll_drags_{};
   std::optional<FocusTarget> focus_{};
+  std::unordered_map<std::string, std::shared_ptr<StateBase>> local_states_{};
   bool dirty_{true};
 };
+
+template <typename T> StateHandle<T> local_state(std::string key, T initial) {
+  if (detail::active_build_instance) {
+    return detail::active_build_instance->local_state<T>(std::move(key),
+                                                         std::move(initial));
+  }
+  return state<T>(std::move(initial));
+}
 
 inline void capture_pointer() {
   if (!detail::active_dispatch_context ||
@@ -1142,6 +1769,333 @@ inline std::optional<RectF> target_frame() {
   }
   return detail::active_dispatch_context->instance->layout_frame_at_path(
       detail::active_dispatch_context->target_path);
+}
+
+inline ViewNode TextField(StateHandle<std::string> value, std::string key,
+                          std::string placeholder = {}) {
+  auto focused = local_state<bool>(key + ":focused", false);
+  auto caret = local_state<std::int64_t>(key + ":caret", 0);
+
+  auto b = view("TextField");
+  b.key(key);
+  b.prop("value", value.get());
+  b.prop("caret", caret.get());
+  b.prop("focused", focused.get());
+  if (!placeholder.empty()) {
+    b.prop("placeholder", std::move(placeholder));
+  }
+
+  b.event("focus",
+          on_focus([focused, value, caret]() mutable {
+            focused.set(true);
+            caret.set(utf8_count(value.get()));
+          }));
+  b.event("blur", on_blur([focused]() mutable { focused.set(false); }));
+
+  b.event("pointer_down", on_pointer_down([value, caret]() mutable {
+            auto r = target_frame();
+            if (!r) {
+              return;
+            }
+            const float padding = 10.0f;
+            const float font_px = 16.0f;
+            const float char_w = font_px * 0.5f;
+            const float local_x = pointer_x() - (r->x + padding);
+            const auto len = utf8_count(value.get());
+            auto pos = static_cast<std::int64_t>(
+                std::round(char_w > 0.0f ? (local_x / char_w) : 0.0f));
+            pos = std::max<std::int64_t>(0, std::min(pos, len));
+            caret.set(pos);
+          }));
+
+  b.event("key_down", on_key_down([value, caret]() mutable {
+            auto c = caret.get();
+            auto s = value.get();
+            const auto len = utf8_count(s);
+            c = std::max<std::int64_t>(0, std::min(c, len));
+
+            if (key_code() == KEY_LEFT) {
+              c = std::max<std::int64_t>(0, c - 1);
+            } else if (key_code() == KEY_RIGHT) {
+              c = std::min<std::int64_t>(len, c + 1);
+            } else if (key_code() == KEY_HOME) {
+              c = 0;
+            } else if (key_code() == KEY_END) {
+              c = len;
+            } else if (key_code() == KEY_BACKSPACE) {
+              utf8_erase_prev_char(s, c);
+              value.set(std::move(s));
+            } else if (key_code() == KEY_DELETE) {
+              utf8_erase_at_char(s, c);
+              value.set(std::move(s));
+            }
+
+            caret.set(c);
+          }));
+
+  b.event("text_input", on_text_input([value, caret]() mutable {
+            auto c = caret.get();
+            auto s = value.get();
+            utf8_insert_at_char(s, c, text_input());
+            value.set(std::move(s));
+            caret.set(c);
+          }));
+
+  return std::move(b).build();
+}
+
+inline ViewNode SecureField(StateHandle<std::string> value, std::string key,
+                            std::string placeholder = {}) {
+  auto b = view("TextField");
+  b.key(key);
+  b.prop("secure", true);
+  b.prop("value", value.get());
+  if (!placeholder.empty()) {
+    b.prop("placeholder", std::move(placeholder));
+  }
+
+  auto focused = local_state<bool>(key + ":focused", false);
+  auto caret = local_state<std::int64_t>(key + ":caret", 0);
+  b.prop("caret", caret.get());
+  b.prop("focused", focused.get());
+
+  b.event("focus",
+          on_focus([focused, value, caret]() mutable {
+            focused.set(true);
+            caret.set(utf8_count(value.get()));
+          }));
+  b.event("blur", on_blur([focused]() mutable { focused.set(false); }));
+
+  b.event("pointer_down", on_pointer_down([value, caret]() mutable {
+            auto r = target_frame();
+            if (!r) {
+              return;
+            }
+            const float padding = 10.0f;
+            const float font_px = 16.0f;
+            const float char_w = font_px * 0.5f;
+            const float local_x = pointer_x() - (r->x + padding);
+            const auto len = utf8_count(value.get());
+            auto pos = static_cast<std::int64_t>(
+                std::round(char_w > 0.0f ? (local_x / char_w) : 0.0f));
+            pos = std::max<std::int64_t>(0, std::min(pos, len));
+            caret.set(pos);
+          }));
+
+  b.event("key_down", on_key_down([value, caret]() mutable {
+            auto c = caret.get();
+            auto s = value.get();
+            const auto len = utf8_count(s);
+            c = std::max<std::int64_t>(0, std::min(c, len));
+
+            if (key_code() == KEY_LEFT) {
+              c = std::max<std::int64_t>(0, c - 1);
+            } else if (key_code() == KEY_RIGHT) {
+              c = std::min<std::int64_t>(len, c + 1);
+            } else if (key_code() == KEY_HOME) {
+              c = 0;
+            } else if (key_code() == KEY_END) {
+              c = len;
+            } else if (key_code() == KEY_BACKSPACE) {
+              utf8_erase_prev_char(s, c);
+              value.set(std::move(s));
+            } else if (key_code() == KEY_DELETE) {
+              utf8_erase_at_char(s, c);
+              value.set(std::move(s));
+            }
+
+            caret.set(c);
+          }));
+
+  b.event("text_input", on_text_input([value, caret]() mutable {
+            auto c = caret.get();
+            auto s = value.get();
+            utf8_insert_at_char(s, c, text_input());
+            value.set(std::move(s));
+            caret.set(c);
+          }));
+
+  return std::move(b).build();
+}
+
+inline ViewNode TextEditor(StateHandle<std::string> value, std::string key) {
+  auto focused = local_state<bool>(key + ":focused", false);
+  auto caret = local_state<std::int64_t>(key + ":caret", 0);
+
+  auto b = view("TextEditor");
+  b.key(key);
+  b.prop("value", value.get());
+  b.prop("caret", caret.get());
+  b.prop("focused", focused.get());
+
+  b.event("focus",
+          on_focus([focused, value, caret]() mutable {
+            focused.set(true);
+            caret.set(utf8_count(value.get()));
+          }));
+  b.event("blur", on_blur([focused]() mutable { focused.set(false); }));
+
+  b.event("pointer_down", on_pointer_down([value, caret]() mutable {
+            auto r = target_frame();
+            if (!r) {
+              return;
+            }
+            const float padding = 10.0f;
+            const float font_px = 16.0f;
+            const float char_w = font_px * 0.5f;
+            const float line_h = font_px * 1.2f;
+
+            const float local_x = pointer_x() - (r->x + padding);
+            const float local_y = pointer_y() - (r->y + padding);
+            const std::int64_t col = static_cast<std::int64_t>(
+                std::max(0.0f, std::round(char_w > 0.0f ? (local_x / char_w)
+                                                       : 0.0f)));
+            const std::int64_t row = static_cast<std::int64_t>(
+                std::max(0.0f, std::floor(line_h > 0.0f ? (local_y / line_h)
+                                                       : 0.0f)));
+
+            auto s = value.get();
+            struct Line {
+              std::int64_t start{};
+              std::int64_t len{};
+            };
+            std::vector<Line> lines;
+            lines.reserve(8);
+            {
+              std::int64_t start = 0;
+              std::int64_t cur = 0;
+              for (std::size_t i = 0; i < s.size();) {
+                if (s[i] == '\n') {
+                  lines.push_back(Line{start, cur - start});
+                  ++cur;
+                  ++i;
+                  start = cur;
+                  continue;
+                }
+                const auto b0 = static_cast<std::uint8_t>(s[i]);
+                std::size_t adv = 1;
+                if ((b0 & 0x80) == 0x00) {
+                  adv = 1;
+                } else if ((b0 & 0xE0) == 0xC0) {
+                  adv = 2;
+                } else if ((b0 & 0xF0) == 0xE0) {
+                  adv = 3;
+                } else if ((b0 & 0xF8) == 0xF0) {
+                  adv = 4;
+                }
+                if (i + adv > s.size()) {
+                  adv = 1;
+                }
+                i += adv;
+                ++cur;
+              }
+              lines.push_back(Line{start, cur - start});
+            }
+
+            const auto total_len = utf8_count(s);
+            const auto rrow = std::max<std::int64_t>(
+                0, std::min<std::int64_t>(row,
+                                          static_cast<std::int64_t>(lines.size()) -
+                                              1));
+            const auto line_start = lines[static_cast<std::size_t>(rrow)].start;
+            const auto line_len = lines[static_cast<std::size_t>(rrow)].len;
+            const auto next = line_start + std::min(col, line_len);
+            caret.set(std::max<std::int64_t>(0, std::min(next, total_len)));
+          }));
+
+  b.event("key_down", on_key_down([value, caret]() mutable {
+            auto c = caret.get();
+            auto s = value.get();
+            const auto total_len = utf8_count(s);
+            c = std::max<std::int64_t>(0, std::min(c, total_len));
+
+            struct Line {
+              std::int64_t start{};
+              std::int64_t len{};
+            };
+            std::vector<Line> lines;
+            lines.reserve(8);
+            {
+              std::int64_t start = 0;
+              std::int64_t cur = 0;
+              for (std::size_t i = 0; i < s.size();) {
+                if (s[i] == '\n') {
+                  lines.push_back(Line{start, cur - start});
+                  ++cur;
+                  ++i;
+                  start = cur;
+                  continue;
+                }
+                const auto b0 = static_cast<std::uint8_t>(s[i]);
+                std::size_t adv = 1;
+                if ((b0 & 0x80) == 0x00) {
+                  adv = 1;
+                } else if ((b0 & 0xE0) == 0xC0) {
+                  adv = 2;
+                } else if ((b0 & 0xF0) == 0xE0) {
+                  adv = 3;
+                } else if ((b0 & 0xF8) == 0xF0) {
+                  adv = 4;
+                }
+                if (i + adv > s.size()) {
+                  adv = 1;
+                }
+                i += adv;
+                ++cur;
+              }
+              lines.push_back(Line{start, cur - start});
+            }
+
+            std::size_t line_idx = 0;
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+              if (c <= lines[i].start + lines[i].len) {
+                line_idx = i;
+                break;
+              }
+            }
+            const std::int64_t col = c - lines[line_idx].start;
+
+            if (key_code() == KEY_LEFT) {
+              c = std::max<std::int64_t>(0, c - 1);
+            } else if (key_code() == KEY_RIGHT) {
+              c = std::min<std::int64_t>(total_len, c + 1);
+            } else if (key_code() == KEY_HOME) {
+              c = lines[line_idx].start;
+            } else if (key_code() == KEY_END) {
+              c = lines[line_idx].start + lines[line_idx].len;
+            } else if (key_code() == KEY_UP) {
+              if (line_idx > 0) {
+                const auto prev = lines[line_idx - 1];
+                c = prev.start + std::min(col, prev.len);
+              }
+            } else if (key_code() == KEY_DOWN) {
+              if (line_idx + 1 < lines.size()) {
+                const auto next = lines[line_idx + 1];
+                c = next.start + std::min(col, next.len);
+              }
+            } else if (key_code() == KEY_BACKSPACE) {
+              utf8_erase_prev_char(s, c);
+              value.set(std::move(s));
+            } else if (key_code() == KEY_DELETE) {
+              utf8_erase_at_char(s, c);
+              value.set(std::move(s));
+            } else if (key_code() == KEY_ENTER || key_code() == KEY_KP_ENTER) {
+              utf8_insert_at_char(s, c, "\n");
+              value.set(std::move(s));
+            }
+
+            caret.set(c);
+          }));
+
+  b.event("text_input", on_text_input([value, caret]() mutable {
+            auto c = caret.get();
+            auto s = value.get();
+            utf8_insert_at_char(s, c, text_input());
+            value.set(std::move(s));
+            caret.set(c);
+          }));
+
+  return std::move(b).build();
 }
 
 } // namespace duorou::ui

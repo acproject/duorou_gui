@@ -109,10 +109,20 @@ duorou_gui 目前的组件类型由 `ViewNode.type` 决定（例如 `"Text"` / `
 | Divider | Divider | 分割线 |
 | Text | Text | 文本显示 |
 | Button | Button | 按钮（依赖事件回调触发行为） |
-| TextField | TextField | 单行输入（支持 placeholder/value/focus 表现） |
+| TextField | TextField | 单行输入（支持 placeholder/value/focus/caret 表现） |
+| SecureField | SecureField | 使用 TextField 的 secure 模式显示 |
+| TextEditor | TextEditor | 多行显示（支持 caret；编辑逻辑由事件实现） |
 | Checkbox | Toggle | SwiftUI 默认是开关样式；macOS 可配置为复选框样式 |
 | Slider | Slider | 数值滑块 |
+| Stepper | Stepper | 加减器（点击左右区域由业务处理加减） |
+| ProgressView | ProgressView | 线性进度条（value 0..1） |
+| Image | Image | 同步纹理绘制（TextureHandle） |
+| ScrollView | ScrollView | 垂直滚动（drag scroll + clip + scroll_y） |
+| List | List | ScrollView + Column 的组合默认样式 |
+| Group | Group | 逻辑分组（重建阶段扁平化，不影响布局） |
+| Section | Section | 标题+内容的组合样式（Box + Column） |
+| Overlay | Overlay | 叠加容器（子节点共享同一布局区域） |
 
 duorou_gui 未覆盖的 SwiftUI 常用项（待扩展）
 
-Spacer、Image/AsyncImage、List/ScrollView、NavigationStack/TabView、Picker/Stepper、Alert/Sheet、动画相关等。
+AsyncImage、NavigationStack/TabView、Picker、Alert/Sheet、动画相关等。

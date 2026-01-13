@@ -33,13 +33,22 @@ inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
   if (measure_leaf_button(node, constraints, out)) {
     return out;
   }
+  if (measure_leaf_stepper(node, constraints, out)) {
+    return out;
+  }
   if (measure_leaf_checkbox(node, constraints, out)) {
     return out;
   }
   if (measure_leaf_slider(node, constraints, out)) {
     return out;
   }
+  if (measure_leaf_progressview(node, constraints, out)) {
+    return out;
+  }
   if (measure_leaf_textfield(node, constraints, out)) {
+    return out;
+  }
+  if (measure_leaf_texteditor(node, constraints, out)) {
     return out;
   }
   if (measure_leaf_spacer(node, constraints, out)) {
@@ -54,6 +63,9 @@ inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
     return out;
   }
   if (measure_node_row(node, constraints, out)) {
+    return out;
+  }
+  if (measure_node_overlay(node, constraints, out)) {
     return out;
   }
   if (measure_node_box(node, constraints, out)) {
@@ -99,6 +111,9 @@ inline LayoutNode layout_node(const ViewNode &node, RectF frame) {
     return out;
   }
   if (layout_children_row(node, frame, out)) {
+    return out;
+  }
+  if (layout_children_overlay(node, frame, out)) {
     return out;
   }
   if (layout_children_box(node, frame, out)) {

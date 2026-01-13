@@ -25,8 +25,11 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
   emit_render_ops_divider(v, l, out);
   emit_render_ops_checkbox(v, l, out);
   emit_render_ops_slider(v, l, out);
+  emit_render_ops_progressview(v, l, out);
   emit_render_ops_textfield(v, l, out);
+  emit_render_ops_texteditor(v, l, out);
   emit_render_ops_button(v, l, out);
+  emit_render_ops_stepper(v, l, out);
   emit_render_ops_image(v, l, out);
   emit_render_ops_text(v, l, out);
 

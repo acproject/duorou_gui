@@ -12,6 +12,12 @@ inline ViewNode Slider(double value) {
   return std::move(b).build();
 }
 
+inline ViewNode ProgressView(double value) {
+  auto b = view("ProgressView");
+  b.prop("value", value);
+  return std::move(b).build();
+}
+
 inline bool measure_leaf_slider(const ViewNode &node, ConstraintsF constraints,
                                 SizeF &out) {
   if (node.type != "Slider") {
@@ -23,6 +29,22 @@ inline bool measure_leaf_slider(const ViewNode &node, ConstraintsF constraints,
   const auto thumb = prop_as_float(node.props, "thumb_size", 14.0f);
   const auto w = default_w + padding * 2.0f;
   const auto h = std::max(track_h, thumb) + padding * 2.0f;
+  out = apply_explicit_size(
+      node, constraints,
+      SizeF{clampf(w, 0.0f, constraints.max_w), clampf(h, 0.0f, constraints.max_h)});
+  return true;
+}
+
+inline bool measure_leaf_progressview(const ViewNode &node, ConstraintsF constraints,
+                                      SizeF &out) {
+  if (node.type != "ProgressView") {
+    return false;
+  }
+  const auto padding = prop_as_float(node.props, "padding", 0.0f);
+  const auto default_w = prop_as_float(node.props, "default_width", 160.0f);
+  const auto bar_h = prop_as_float(node.props, "height", 8.0f);
+  const auto w = default_w + padding * 2.0f;
+  const auto h = bar_h + padding * 2.0f;
   out = apply_explicit_size(
       node, constraints,
       SizeF{clampf(w, 0.0f, constraints.max_w), clampf(h, 0.0f, constraints.max_h)});
@@ -57,5 +79,24 @@ inline bool emit_render_ops_slider(const ViewNode &v, const LayoutNode &l,
   return true;
 }
 
-} // namespace duorou::ui
+inline bool emit_render_ops_progressview(const ViewNode &v, const LayoutNode &l,
+                                         std::vector<RenderOp> &out) {
+  if (v.type != "ProgressView") {
+    return false;
+  }
+  const auto padding = prop_as_float(v.props, "padding", 0.0f);
+  const auto t = clampf(prop_as_float(v.props, "value", 0.0f), 0.0f, 1.0f);
+  const auto track = prop_as_color(v.props, "track", ColorU8{60, 60, 60, 255});
+  const auto fill = prop_as_color(v.props, "fill", ColorU8{80, 140, 255, 255});
 
+  const float x0 = l.frame.x + padding;
+  const float y0 = l.frame.y + padding;
+  const float w = std::max(0.0f, l.frame.w - padding * 2.0f);
+  const float h = std::max(0.0f, l.frame.h - padding * 2.0f);
+  const RectF bar{x0, y0, w, h};
+  out.push_back(DrawRect{bar, track});
+  out.push_back(DrawRect{RectF{bar.x, bar.y, bar.w * t, bar.h}, fill});
+  return true;
+}
+
+} // namespace duorou::ui

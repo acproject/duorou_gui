@@ -38,6 +38,32 @@ inline ViewNode List(std::initializer_list<ViewNode> children) {
   return std::move(b).build();
 }
 
+inline ViewNode Section(std::string header, std::initializer_list<ViewNode> children) {
+  auto content = view("Column");
+  content.prop("spacing", 8.0);
+  content.prop("cross_align", "stretch");
+  content.children([&](auto &c) {
+    if (!header.empty()) {
+      c.add(view("Text")
+                .prop("value", header)
+                .prop("font_size", 12.0)
+                .prop("color", 0xFFB0B0B0)
+                .build());
+    }
+    for (auto &ch : children) {
+      c.add(std::move(ch));
+    }
+  });
+
+  auto b = view("Box");
+  b.prop("padding", 12.0);
+  b.prop("bg", 0xFF202020);
+  b.prop("border", 0xFF3A3A3A);
+  b.prop("border_width", 1.0);
+  b.children({std::move(content).build()});
+  return std::move(b).build();
+}
+
 inline void dump_tree(std::ostream &os, const ViewNode &node,
                       int indent_spaces = 0) {
   for (int i = 0; i < indent_spaces; ++i) {

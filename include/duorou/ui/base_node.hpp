@@ -18,6 +18,10 @@ using PropValue = std::variant<std::string, std::int64_t, double, bool>;
 
 using Props = std::unordered_map<std::string, PropValue>;
 
+struct BindingId {
+  std::int64_t raw{};
+};
+
 struct ViewNode {
   NodeId id{};
   std::string key;
@@ -53,6 +57,10 @@ public:
   ViewBuilder &prop(std::string key, std::int64_t value) {
     node_.props.insert_or_assign(std::move(key), PropValue{value});
     return *this;
+  }
+
+  ViewBuilder &prop(std::string key, BindingId value) {
+    return prop(std::move(key), value.raw);
   }
 
   ViewBuilder &prop(std::string key, double value) {
@@ -114,4 +122,3 @@ inline ViewBuilder view(std::string type) {
 }
 
 } // namespace duorou::ui
-
