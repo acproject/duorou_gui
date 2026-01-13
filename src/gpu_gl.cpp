@@ -6,6 +6,8 @@ int main() { return 0; }
 
 #include <GLFW/glfw3.h>
 
+#include "terminal_view.hpp"
+
 #if !defined(GL_CLAMP_TO_EDGE)
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
@@ -1345,7 +1347,18 @@ static void char_cb(GLFWwindow *win, unsigned int codepoint) {
   }
 }
 
-int main() {
+int main(int argc, char **argv) {
+  bool use_terminal = false;
+  for (int i = 1; i < argc; ++i) {
+    const char *arg = argv ? argv[i] : nullptr;
+    if (!arg) {
+      continue;
+    }
+    if (std::strcmp(arg, "--terminal") == 0 || std::strcmp(arg, "terminal") == 0) {
+      use_terminal = true;
+    }
+  }
+
   if (!glfwInit()) {
     return 1;
   }
@@ -1353,8 +1366,10 @@ int main() {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
+  const char *title =
+      use_terminal ? "duorou_terminal_demo (OpenGL)" : "duorou_gpu_demo (OpenGL)";
   GLFWwindow *win =
-      glfwCreateWindow(800, 600, "duorou_gpu_demo (OpenGL)", nullptr, nullptr);
+      glfwCreateWindow(800, 600, title, nullptr, nullptr);
   if (!win) {
     glfwTerminate();
     return 1;
@@ -1404,6 +1419,10 @@ int main() {
   GLTextCache text_cache;
 
   ViewInstance app{[&]() {
+    if (use_terminal) {
+      return duorou::ui::examples::terminal_view();
+    }
+
     auto slider_set_from_pointer = [slider]() mutable {
       auto r = target_frame();
       if (!r || !(r->w > 0.0f)) {

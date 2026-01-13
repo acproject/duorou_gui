@@ -8,9 +8,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
+
+#include "terminal_view.hpp"
 
 using namespace duorou::ui;
 
@@ -503,7 +506,12 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
 
 @end
 
-static std::unique_ptr<ViewInstance> make_instance() {
+static std::unique_ptr<ViewInstance> make_instance(bool use_terminal) {
+  if (use_terminal) {
+    auto fn = []() { return duorou::ui::examples::terminal_view(); };
+    return std::make_unique<ViewInstance>(std::move(fn));
+  }
+
   auto count = state<std::int64_t>(0);
   auto pressed = state<bool>(false);
 
@@ -539,8 +547,16 @@ static std::unique_ptr<ViewInstance> make_instance() {
 }
 
 int main(int argc, const char *argv[]) {
-  (void)argc;
-  (void)argv;
+  bool use_terminal = false;
+  for (int i = 1; i < argc; ++i) {
+    const char *arg = argv ? argv[i] : nullptr;
+    if (!arg) {
+      continue;
+    }
+    if (std::strcmp(arg, "--terminal") == 0 || std::strcmp(arg, "terminal") == 0) {
+      use_terminal = true;
+    }
+  }
 
   @autoreleasepool {
     [NSApplication sharedApplication];
@@ -554,7 +570,7 @@ int main(int argc, const char *argv[]) {
       return 1;
     }
 
-    auto instance = make_instance();
+    auto instance = make_instance(use_terminal);
 
     NSRect frame = NSMakeRect(0, 0, 640, 480);
     NSWindowStyleMask style = NSWindowStyleMaskTitled |
