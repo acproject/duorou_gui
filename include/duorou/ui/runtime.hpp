@@ -8,8 +8,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -23,10 +25,30 @@
 #include <variant>
 #include <vector>
 
+#if defined(_WIN32)
+#if !defined(NOMINMAX)
+#define NOMINMAX 1
+#endif
+#if !defined(WIN32_LEAN_AND_MEAN)
+#define WIN32_LEAN_AND_MEAN 1
+#endif
+#include <windows.h>
+#include <commdlg.h>
+#include <shellapi.h>
+#endif
+
 namespace duorou::ui {
 
 class StateBase;
 class ViewInstance;
+
+inline double now_ms();
+
+struct AnimationSpec {
+  double duration_ms{200.0};
+  double delay_ms{0.0};
+  std::string curve{"easeInOut"};
+};
 
 class Subscription {
 public:
@@ -109,6 +131,11 @@ private:
   std::unordered_map<std::uint64_t, Callback> callbacks_{};
 };
 
+class ObservableObject : public StateBase {
+public:
+  void notify() { notify_changed(); }
+};
+
 inline void Subscription::reset() {
   if (!state_ || id_ == 0) {
     return;
@@ -168,6 +195,9 @@ struct EventDispatchContext {
 
 inline thread_local EventDispatchContext *active_dispatch_context = nullptr;
 inline thread_local ViewInstance *active_build_instance = nullptr;
+inline thread_local std::optional<AnimationSpec> active_animation_spec = std::nullopt;
+
+void request_animation(const AnimationSpec &spec);
 
 } // namespace detail
 
@@ -275,6 +305,9 @@ public:
     {
       std::lock_guard<std::mutex> lock{value_mutex_};
       value_ = std::move(v);
+    }
+    if (detail::active_animation_spec) {
+      detail::request_animation(*detail::active_animation_spec);
     }
     notify_changed();
   }
@@ -584,6 +617,34 @@ public:
 
   const std::vector<RenderOp> &render_ops() const { return render_ops_; }
 
+  void set_env_value(std::string key, PropValue value) {
+    env_values_.insert_or_assign(std::move(key), std::move(value));
+  }
+
+  const PropValue *env_value(const std::string &key) const {
+    const auto it = env_values_.find(key);
+    return it == env_values_.end() ? nullptr : &it->second;
+  }
+
+  void set_env_object(std::string key, std::shared_ptr<void> obj) {
+    env_objects_.insert_or_assign(std::move(key), std::move(obj));
+  }
+
+  std::shared_ptr<void> env_object(const std::string &key) const {
+    const auto it = env_objects_.find(key);
+    return it == env_objects_.end() ? std::shared_ptr<void>{} : it->second;
+  }
+
+  void invoke_handler(std::uint64_t handler_id) {
+    if (handler_id == 0) {
+      return;
+    }
+    const auto it = handlers_.find(handler_id);
+    if (it != handlers_.end() && it->second) {
+      it->second();
+    }
+  }
+
   std::optional<RectF>
   layout_frame_at_path(const std::vector<std::size_t> &path) const {
     const auto *ln = layout_at_path(layout_, path);
@@ -721,16 +782,62 @@ public:
   };
 
   UpdateResult update() {
-    if (!dirty_ && !deps_changed()) {
-      return UpdateResult{false, {}, false, false};
+    const double now = now_ms();
+
+    bool any_timeline = false;
+    for (auto &kv : timelines_) {
+      auto &t = kv.second;
+      if (!(t.interval_ms > 0.0)) {
+        continue;
+      }
+      if (t.last_ms <= 0.0) {
+        t.last_ms = now;
+        continue;
+      }
+      if (now - t.last_ms >= t.interval_ms) {
+        t.last_ms = now;
+        auto slot = local_state<double>(t.key + ":timeline_now", now);
+        slot.set(now);
+        any_timeline = true;
+      }
     }
-    return rebuild();
+
+    if (dirty_ || deps_changed()) {
+      return rebuild();
+    }
+
+    if (!anims_.empty()) {
+      const bool changed = step_animations(now);
+      if (changed) {
+        render_ops_ = build_render_ops(tree_, layout_);
+        return UpdateResult{false, {}, false, true};
+      }
+    }
+
+    if (any_timeline) {
+      return rebuild();
+    }
+
+    return UpdateResult{false, {}, false, false};
   }
 
   void set_viewport(SizeF viewport) {
     viewport_ = viewport;
     layout_ = layout_tree(tree_, viewport_);
     render_ops_ = build_render_ops(tree_, layout_);
+  }
+
+  void set_pending_animation(AnimationSpec spec) {
+    pending_animation_ = std::move(spec);
+  }
+
+  void register_timeline(std::string key, double interval_ms) {
+    auto &t = timelines_[key];
+    t.key = std::move(key);
+    t.interval_ms = interval_ms;
+    if (t.last_ms < 0.0) {
+      t.last_ms = 0.0;
+    }
   }
 
   template <typename T> StateHandle<T> local_state(std::string key, T initial) {
@@ -746,6 +853,204 @@ public:
   }
 
 private:
+  struct PropAnim {
+    std::vector<std::size_t> path;
+    std::string prop_key;
+    PropValue from;
+    PropValue to;
+    double start_ms{};
+    double duration_ms{};
+    double delay_ms{};
+  };
+
+  struct TimelineReg {
+    std::string key;
+    double interval_ms{};
+    double last_ms{};
+  };
+
+  struct MatchedGeomEntry {
+    std::vector<std::size_t> path;
+    RectF frame;
+  };
+
+  static bool prop_is_color_key(const std::string &k) {
+    return k == "bg" || k == "border" || k == "color" || k == "tint" ||
+           k == "track" || k == "fill" || k == "scrollbar_track" ||
+           k == "scrollbar_thumb";
+  }
+
+  static bool prop_is_animatable_key(const std::string &k) {
+    if (prop_is_color_key(k)) {
+      return true;
+    }
+    return k == "opacity" || k == "render_offset_x" || k == "render_offset_y" ||
+           k == "border_width";
+  }
+
+  static bool prop_can_interpolate(const std::string &key, const PropValue &a,
+                                  const PropValue &b) {
+    if (prop_is_color_key(key)) {
+      const auto ca = [&]() -> bool {
+        if (std::holds_alternative<std::int64_t>(a)) {
+          return true;
+        }
+        if (std::holds_alternative<double>(a)) {
+          return true;
+        }
+        return false;
+      }();
+      const auto cb = [&]() -> bool {
+        if (std::holds_alternative<std::int64_t>(b)) {
+          return true;
+        }
+        if (std::holds_alternative<double>(b)) {
+          return true;
+        }
+        return false;
+      }();
+      return ca && cb;
+    }
+
+    double da = 0.0;
+    double db = 0.0;
+    return prop_as_double_any(a, da) && prop_as_double_any(b, db);
+  }
+
+  static bool prop_as_double_any(const PropValue &v, double &out) {
+    if (const auto *d = std::get_if<double>(&v)) {
+      out = *d;
+      return true;
+    }
+    if (const auto *i = std::get_if<std::int64_t>(&v)) {
+      out = static_cast<double>(*i);
+      return true;
+    }
+    if (const auto *b = std::get_if<bool>(&v)) {
+      out = *b ? 1.0 : 0.0;
+      return true;
+    }
+    return false;
+  }
+
+  static std::uint32_t pack_color_u32(ColorU8 c) {
+    return static_cast<std::uint32_t>(c.r) |
+           (static_cast<std::uint32_t>(c.g) << 8) |
+           (static_cast<std::uint32_t>(c.b) << 16) |
+           (static_cast<std::uint32_t>(c.a) << 24);
+  }
+
+  static PropValue interpolate_prop(const std::string &key, const PropValue &a,
+                                    const PropValue &b, double t) {
+    t = std::max(0.0, std::min(1.0, t));
+    if (prop_is_color_key(key)) {
+      const auto ca = [&]() -> std::optional<ColorU8> {
+        if (const auto *i = std::get_if<std::int64_t>(&a)) {
+          return color_from_u32(static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(*i) & 0xFFFFFFFFull));
+        }
+        if (const auto *d = std::get_if<double>(&a)) {
+          return color_from_u32(static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(*d) & 0xFFFFFFFFull));
+        }
+        return std::nullopt;
+      }();
+      const auto cb = [&]() -> std::optional<ColorU8> {
+        if (const auto *i = std::get_if<std::int64_t>(&b)) {
+          return color_from_u32(static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(*i) & 0xFFFFFFFFull));
+        }
+        if (const auto *d = std::get_if<double>(&b)) {
+          return color_from_u32(static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(*d) & 0xFFFFFFFFull));
+        }
+        return std::nullopt;
+      }();
+      if (ca && cb) {
+        auto lerp_u8 = [&](std::uint8_t x, std::uint8_t y) -> std::uint8_t {
+          const double v = static_cast<double>(x) +
+                           (static_cast<double>(y) - static_cast<double>(x)) * t;
+          return clamp_u8(static_cast<int>(std::lround(v)));
+        };
+        ColorU8 c;
+        c.r = lerp_u8(ca->r, cb->r);
+        c.g = lerp_u8(ca->g, cb->g);
+        c.b = lerp_u8(ca->b, cb->b);
+        c.a = lerp_u8(ca->a, cb->a);
+        return PropValue{static_cast<std::int64_t>(pack_color_u32(c))};
+      }
+    }
+
+    double da = 0.0;
+    double db = 0.0;
+    if (prop_as_double_any(a, da) && prop_as_double_any(b, db)) {
+      return PropValue{da + (db - da) * t};
+    }
+
+    return b;
+  }
+
+  static std::optional<AnimationSpec> animation_spec_from_node(const ViewNode &v) {
+    if (!prop_as_bool(v.props, "animation_enabled", false)) {
+      return std::nullopt;
+    }
+    AnimationSpec s;
+    s.duration_ms = prop_as_float(v.props, "animation_duration_ms", 200.0f);
+    s.delay_ms = prop_as_float(v.props, "animation_delay_ms", 0.0f);
+    s.curve = prop_as_string(v.props, "animation_curve", "easeInOut");
+    return s;
+  }
+
+  std::optional<AnimationSpec>
+  animation_spec_for_path(const ViewNode &root,
+                          const std::vector<std::size_t> &path) const {
+    std::vector<std::size_t> cur = path;
+    for (;;) {
+      if (const auto *vn = node_at_path(root, cur)) {
+        if (auto s = animation_spec_from_node(*vn)) {
+          return s;
+        }
+      }
+      if (cur.empty()) {
+        break;
+      }
+      cur.pop_back();
+    }
+    return std::nullopt;
+  }
+
+  bool step_animations(double now) {
+    bool changed = false;
+    std::vector<PropAnim> keep;
+    keep.reserve(anims_.size());
+    for (auto &a : anims_) {
+      if (a.path.empty() && a.prop_key.empty()) {
+        continue;
+      }
+      const double t0 = a.start_ms + a.delay_ms;
+      if (now < t0) {
+        keep.push_back(a);
+        continue;
+      }
+      const double denom = std::max(1e-6, a.duration_ms);
+      const double t = (now - t0) / denom;
+      auto *vn = node_at_path_mut(tree_, a.path);
+      if (!vn) {
+        continue;
+      }
+      const auto next = interpolate_prop(a.prop_key, a.from, a.to, t);
+      vn->props.insert_or_assign(a.prop_key, next);
+      changed = true;
+      if (t < 1.0) {
+        keep.push_back(a);
+      } else {
+        vn->props.insert_or_assign(a.prop_key, a.to);
+      }
+    }
+    anims_ = std::move(keep);
+    return changed;
+  }
+
   struct CaptureTarget {
     std::vector<std::size_t> path;
     std::string key;
@@ -1271,8 +1576,13 @@ private:
 
   UpdateResult rebuild() {
     auto old_tree = tree_;
+    auto old_layout = layout_;
 
     detail::EventCollector event_collector;
+
+    env_values_.clear();
+    env_objects_.clear();
+    timelines_.clear();
 
     detail::DependencyCollector collector;
     detail::active_collector = &collector;
@@ -1785,11 +2095,177 @@ private:
 
     auto patches = old_tree.type.empty() ? std::vector<PatchOp>{}
                                          : diff_tree(old_tree, new_tree);
+
+    const double anim_start_ms = now_ms();
+    std::vector<PropAnim> next_anims;
+    std::optional<AnimationSpec> override_spec = pending_animation_;
+    pending_animation_ = std::nullopt;
+
+    auto spec_for = [&](const std::vector<std::size_t> &path)
+        -> std::optional<AnimationSpec> {
+      if (override_spec) {
+        return override_spec;
+      }
+      return animation_spec_for_path(new_tree, path);
+    };
+
+    auto schedule_prop_anim = [&](const std::vector<std::size_t> &path,
+                                  std::string prop_key, PropValue from,
+                                  PropValue to, const AnimationSpec &spec) {
+      if (auto *vn = node_at_path_mut(new_tree, path)) {
+        vn->props.insert_or_assign(prop_key, from);
+      }
+      PropAnim a;
+      a.path = path;
+      a.prop_key = std::move(prop_key);
+      a.from = std::move(from);
+      a.to = std::move(to);
+      a.start_ms = anim_start_ms;
+      a.duration_ms = spec.duration_ms;
+      a.delay_ms = spec.delay_ms;
+      next_anims.push_back(std::move(a));
+    };
+
+    for (const auto &p : patches) {
+      std::visit(
+          [&](const auto &op) {
+            using T = std::decay_t<decltype(op)>;
+            if constexpr (std::is_same_v<T, PatchSetProp>) {
+              if (!prop_is_animatable_key(op.key)) {
+                return;
+              }
+              const auto *old_node = node_at_path(old_tree, op.path);
+              if (!old_node) {
+                return;
+              }
+              const auto *from_pv = find_prop(old_node->props, op.key);
+              if (!from_pv) {
+                return;
+              }
+              if (!prop_can_interpolate(op.key, *from_pv, op.value)) {
+                return;
+              }
+              const auto s = spec_for(op.path);
+              if (!s) {
+                return;
+              }
+              schedule_prop_anim(op.path, op.key, *from_pv, op.value, *s);
+            } else if constexpr (std::is_same_v<T, PatchInsertChild>) {
+              auto child_path = op.parent_path;
+              child_path.push_back(op.index);
+              auto *vn = node_at_path_mut(new_tree, child_path);
+              if (!vn) {
+                return;
+              }
+              const auto tr = prop_as_string(vn->props, "transition", "");
+              if (tr != "opacity") {
+                return;
+              }
+              const auto s = spec_for(child_path);
+              if (!s) {
+                return;
+              }
+              const double to_op = static_cast<double>(
+                  prop_as_float(vn->props, "opacity", 1.0f));
+              schedule_prop_anim(child_path, "opacity", PropValue{0.0},
+                                 PropValue{to_op}, *s);
+            }
+          },
+          p);
+    }
+
+    anims_ = std::move(next_anims);
     tree_ = std::move(new_tree);
 
     handlers_ = std::move(event_collector.handlers);
 
     layout_ = layout_tree(tree_, viewport_);
+
+    std::unordered_map<std::string, RectF> old_frames;
+    {
+      if (!old_tree.type.empty() && !old_layout.type.empty()) {
+        auto collect_matched = [&](auto &&self, const ViewNode &v,
+                                   const LayoutNode &l,
+                                   std::unordered_map<std::string, RectF> &out)
+            -> void {
+          const auto ns = prop_as_string(v.props, "matched_geom_ns", "");
+          const auto id = prop_as_string(v.props, "matched_geom_id", "");
+          if (!ns.empty() && !id.empty()) {
+            out.insert_or_assign(ns + "|" + id, l.frame);
+          }
+          const auto n = std::min(v.children.size(), l.children.size());
+          for (std::size_t i = 0; i < n; ++i) {
+            self(self, v.children[i], l.children[i], out);
+          }
+        };
+        collect_matched(collect_matched, old_tree, old_layout, old_frames);
+      }
+    }
+
+    auto apply_matched = [&](auto &&self, ViewNode &v, const LayoutNode &l,
+                             std::vector<std::size_t> &path) -> void {
+      const auto ns = prop_as_string(v.props, "matched_geom_ns", "");
+      const auto id = prop_as_string(v.props, "matched_geom_id", "");
+      if (!ns.empty() && !id.empty()) {
+        const auto it_old = old_frames.find(ns + "|" + id);
+        if (it_old != old_frames.end()) {
+          const auto dx = static_cast<double>(it_old->second.x - l.frame.x);
+          const auto dy = static_cast<double>(it_old->second.y - l.frame.y);
+          if (dx != 0.0 || dy != 0.0) {
+            const auto s = [&]() -> std::optional<AnimationSpec> {
+              if (override_spec) {
+                return override_spec;
+              }
+              return animation_spec_for_path(tree_, path);
+            }();
+            if (s) {
+              const auto base_x =
+                  static_cast<double>(prop_as_float(v.props, "render_offset_x", 0.0f));
+              const auto base_y =
+                  static_cast<double>(prop_as_float(v.props, "render_offset_y", 0.0f));
+
+              const double from_x = base_x + dx;
+              const double from_y = base_y + dy;
+              v.props.insert_or_assign("render_offset_x", PropValue{from_x});
+              v.props.insert_or_assign("render_offset_y", PropValue{from_y});
+
+              PropAnim ax;
+              ax.path = path;
+              ax.prop_key = "render_offset_x";
+              ax.from = PropValue{from_x};
+              ax.to = PropValue{base_x};
+              ax.start_ms = anim_start_ms;
+              ax.duration_ms = s->duration_ms;
+              ax.delay_ms = s->delay_ms;
+              anims_.push_back(std::move(ax));
+
+              PropAnim ay;
+              ay.path = path;
+              ay.prop_key = "render_offset_y";
+              ay.from = PropValue{from_y};
+              ay.to = PropValue{base_y};
+              ay.start_ms = anim_start_ms;
+              ay.duration_ms = s->duration_ms;
+              ay.delay_ms = s->delay_ms;
+              anims_.push_back(std::move(ay));
+            }
+          }
+        }
+      }
+
+      const auto n = std::min(v.children.size(), l.children.size());
+      for (std::size_t i = 0; i < n; ++i) {
+        path.push_back(i);
+        self(self, v.children[i], l.children[i], path);
+        path.pop_back();
+      }
+    };
+
+    {
+      std::vector<std::size_t> path;
+      apply_matched(apply_matched, tree_, layout_, path);
+    }
+
     render_ops_ = build_render_ops(tree_, layout_);
 
     deps_.clear();
@@ -1819,8 +2295,29 @@ private:
   std::unordered_map<int, ScrollDrag> scroll_drags_{};
   std::optional<FocusTarget> focus_{};
   std::unordered_map<std::string, std::shared_ptr<StateBase>> local_states_{};
+  std::unordered_map<std::string, PropValue> env_values_{};
+  std::unordered_map<std::string, std::shared_ptr<void>> env_objects_{};
+  std::optional<AnimationSpec> pending_animation_{};
+  std::vector<PropAnim> anims_{};
+  std::unordered_map<std::string, TimelineReg> timelines_{};
   bool dirty_{true};
 };
+
+namespace detail {
+inline void request_animation(const AnimationSpec &spec) {
+  ViewInstance *inst = nullptr;
+  if (active_dispatch_context) {
+    inst = active_dispatch_context->instance;
+  }
+  if (!inst) {
+    inst = active_build_instance;
+  }
+  if (!inst) {
+    return;
+  }
+  inst->set_pending_animation(spec);
+}
+} // namespace detail
 
 template <typename T> StateHandle<T> local_state(std::string key, T initial) {
   if (detail::active_build_instance) {
@@ -1828,6 +2325,360 @@ template <typename T> StateHandle<T> local_state(std::string key, T initial) {
                                                          std::move(initial));
   }
   return state<T>(std::move(initial));
+}
+
+template <typename T> class ObservedObjectHandle {
+public:
+  explicit ObservedObjectHandle(std::shared_ptr<T> ptr) : ptr_{std::move(ptr)} {
+    static_assert(std::is_base_of_v<StateBase, T>);
+  }
+
+  bool valid() const { return static_cast<bool>(ptr_); }
+
+  std::shared_ptr<T> get() const {
+    detail::record_dependency(ptr_.get());
+    return ptr_;
+  }
+
+  T *operator->() const {
+    detail::record_dependency(ptr_.get());
+    return ptr_.get();
+  }
+
+  T &operator*() const {
+    detail::record_dependency(ptr_.get());
+    return *ptr_;
+  }
+
+private:
+  std::shared_ptr<T> ptr_;
+};
+
+template <typename T>
+inline ObservedObjectHandle<T> ObservedObject(std::shared_ptr<T> obj) {
+  static_assert(std::is_base_of_v<StateBase, T>);
+  return ObservedObjectHandle<T>{std::move(obj)};
+}
+
+template <typename T, typename... Args>
+inline ObservedObjectHandle<T> StateObject(std::string key, Args &&...args) {
+  static_assert(std::is_base_of_v<StateBase, T>);
+  auto slot = local_state<std::shared_ptr<T>>(std::move(key),
+                                              std::shared_ptr<T>{});
+  auto obj = slot.get();
+  if (!obj) {
+    obj = std::make_shared<T>(std::forward<Args>(args)...);
+    slot.set(obj);
+  }
+  return ObservedObjectHandle<T>{std::move(obj)};
+}
+
+template <typename T> inline StateHandle<T> FocusState(std::string key, T initial) {
+  return local_state<T>(std::move(key), std::move(initial));
+}
+
+inline void provide_environment(std::string key, PropValue value) {
+  if (!detail::active_build_instance) {
+    return;
+  }
+  detail::active_build_instance->set_env_value(std::move(key), std::move(value));
+}
+
+inline void provide_environment(std::string key, const char *value) {
+  provide_environment(std::move(key), PropValue{std::string{value}});
+}
+
+inline void provide_environment(std::string key, std::string value) {
+  provide_environment(std::move(key), PropValue{std::move(value)});
+}
+
+inline void provide_environment(std::string key, std::int64_t value) {
+  provide_environment(std::move(key), PropValue{value});
+}
+
+inline void provide_environment(std::string key, double value) {
+  provide_environment(std::move(key), PropValue{value});
+}
+
+inline void provide_environment(std::string key, bool value) {
+  provide_environment(std::move(key), PropValue{value});
+}
+
+template <typename Int,
+          typename = std::enable_if_t<
+              std::is_integral_v<std::remove_reference_t<Int>> &&
+              !std::is_same_v<std::remove_reference_t<Int>, bool> &&
+              !std::is_same_v<std::remove_reference_t<Int>, std::int64_t>>>
+inline void provide_environment(std::string key, Int value) {
+  provide_environment(std::move(key), static_cast<std::int64_t>(value));
+}
+
+template <typename T> inline T Environment(const std::string &key, T fallback) {
+  if (!detail::active_build_instance) {
+    return fallback;
+  }
+  const auto *pv = detail::active_build_instance->env_value(key);
+  if (!pv) {
+    return fallback;
+  }
+
+  if constexpr (std::is_same_v<T, std::string>) {
+    if (const auto *s = std::get_if<std::string>(pv)) {
+      return *s;
+    }
+    return fallback;
+  } else if constexpr (std::is_same_v<T, bool>) {
+    if (const auto *b = std::get_if<bool>(pv)) {
+      return *b;
+    }
+    if (const auto *i = std::get_if<std::int64_t>(pv)) {
+      return *i != 0;
+    }
+    if (const auto *d = std::get_if<double>(pv)) {
+      return *d != 0.0;
+    }
+    return fallback;
+  } else if constexpr (std::is_integral_v<T>) {
+    if (const auto *i = std::get_if<std::int64_t>(pv)) {
+      return static_cast<T>(*i);
+    }
+    if (const auto *d = std::get_if<double>(pv)) {
+      return static_cast<T>(*d);
+    }
+    if (const auto *b = std::get_if<bool>(pv)) {
+      return static_cast<T>(*b ? 1 : 0);
+    }
+    return fallback;
+  } else if constexpr (std::is_floating_point_v<T>) {
+    if (const auto *d = std::get_if<double>(pv)) {
+      return static_cast<T>(*d);
+    }
+    if (const auto *i = std::get_if<std::int64_t>(pv)) {
+      return static_cast<T>(*i);
+    }
+    if (const auto *b = std::get_if<bool>(pv)) {
+      return static_cast<T>(*b ? 1 : 0);
+    }
+    return fallback;
+  } else {
+    return fallback;
+  }
+}
+
+template <typename T>
+inline void provide_environment_object(std::string key, std::shared_ptr<T> obj) {
+  if (!detail::active_build_instance) {
+    return;
+  }
+  detail::active_build_instance->set_env_object(std::move(key),
+                                                std::static_pointer_cast<void>(
+                                                    std::move(obj)));
+}
+
+template <typename T>
+inline ObservedObjectHandle<T> EnvironmentObject(const std::string &key) {
+  static_assert(std::is_base_of_v<StateBase, T>);
+  if (!detail::active_build_instance) {
+    return ObservedObjectHandle<T>{std::shared_ptr<T>{}};
+  }
+  auto p = detail::active_build_instance->env_object(key);
+  return ObservedObjectHandle<T>{std::static_pointer_cast<T>(std::move(p))};
+}
+
+template <typename Fn>
+inline std::uint64_t chain_handler(std::uint64_t prev_handler_id, Fn fn);
+
+inline ViewNode focusable(ViewNode node, StateHandle<std::string> focus,
+                          std::string id) {
+  if (node.key.empty() && !id.empty()) {
+    node.key = id;
+  }
+  const std::string focus_id = node.key.empty() ? std::move(id) : node.key;
+
+  const auto prev_focus = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("focus"); it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_blur = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("blur"); it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+
+  node.props.insert_or_assign("focused", focus.get() == focus_id);
+
+  node.events.insert_or_assign(
+      "focus", chain_handler(prev_focus, [focus, focus_id]() mutable {
+        focus.set(focus_id);
+      }));
+
+  node.events.insert_or_assign(
+      "blur", chain_handler(prev_blur, [focus, focus_id]() mutable {
+        if (focus.get() == focus_id) {
+          focus.set("");
+        }
+      }));
+
+  return node;
+}
+
+inline bool open_url(const std::string &url) {
+  if (url.empty()) {
+    return false;
+  }
+#if defined(_WIN32)
+  const auto r = reinterpret_cast<std::intptr_t>(
+      ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+  return r > 32;
+#elif defined(__APPLE__)
+  std::string cmd = "open \"";
+  for (const char ch : url) {
+    if (ch == '\"') {
+      cmd.push_back('\\');
+    }
+    cmd.push_back(ch);
+  }
+  cmd.push_back('\"');
+  return std::system(cmd.c_str()) == 0;
+#else
+  std::string cmd = "xdg-open \"";
+  for (const char ch : url) {
+    if (ch == '\"') {
+      cmd.push_back('\\');
+    }
+    cmd.push_back(ch);
+  }
+  cmd.push_back('\"');
+  return std::system(cmd.c_str()) == 0;
+#endif
+}
+
+inline bool set_clipboard_text(std::string text) {
+  if (text.empty()) {
+    return false;
+  }
+#if defined(_WIN32)
+  if (!OpenClipboard(nullptr)) {
+    return false;
+  }
+  struct Close {
+    ~Close() { CloseClipboard(); }
+  } close;
+
+  if (!EmptyClipboard()) {
+    return false;
+  }
+
+  const int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+  if (wlen <= 0) {
+    return false;
+  }
+
+  const std::size_t bytes = static_cast<std::size_t>(wlen) * sizeof(wchar_t);
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+  if (!mem) {
+    return false;
+  }
+
+  auto *buf = static_cast<wchar_t *>(GlobalLock(mem));
+  if (!buf) {
+    GlobalFree(mem);
+    return false;
+  }
+  MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, buf, wlen);
+  GlobalUnlock(mem);
+
+  if (!SetClipboardData(CF_UNICODETEXT, mem)) {
+    GlobalFree(mem);
+    return false;
+  }
+  return true;
+#else
+  return false;
+#endif
+}
+
+inline std::optional<std::string> open_file_dialog(std::string title,
+                                                   bool images_only = false) {
+#if defined(_WIN32)
+  auto to_wide = [](const std::string &s) -> std::wstring {
+    if (s.empty()) {
+      return {};
+    }
+    const int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) {
+      return {};
+    }
+    std::wstring out;
+    out.resize(static_cast<std::size_t>(wlen - 1));
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), wlen);
+    return out;
+  };
+
+  auto to_utf8 = [](const wchar_t *ws) -> std::string {
+    if (!ws || *ws == 0) {
+      return {};
+    }
+    const int len =
+        WideCharToMultiByte(CP_UTF8, 0, ws, -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) {
+      return {};
+    }
+    std::string out;
+    out.resize(static_cast<std::size_t>(len - 1));
+    WideCharToMultiByte(CP_UTF8, 0, ws, -1, out.data(), len, nullptr, nullptr);
+    return out;
+  };
+
+  std::wstring filter;
+  if (images_only) {
+    filter.append(L"Images");
+    filter.push_back(L'\0');
+    filter.append(L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp");
+    filter.push_back(L'\0');
+    filter.append(L"All Files");
+    filter.push_back(L'\0');
+    filter.append(L"*.*");
+    filter.push_back(L'\0');
+    filter.push_back(L'\0');
+  } else {
+    filter.append(L"All Files");
+    filter.push_back(L'\0');
+    filter.append(L"*.*");
+    filter.push_back(L'\0');
+    filter.push_back(L'\0');
+  }
+
+  std::wstring wtitle = to_wide(title);
+
+  wchar_t file_buf[4096]{};
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof(ofn);
+  ofn.hwndOwner = nullptr;
+  ofn.lpstrFile = file_buf;
+  ofn.nMaxFile = static_cast<DWORD>(std::size(file_buf));
+  ofn.lpstrTitle = wtitle.empty() ? nullptr : wtitle.c_str();
+  ofn.lpstrFilter = filter.c_str();
+  ofn.nFilterIndex = 1;
+  ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_EXPLORER;
+
+  if (!GetOpenFileNameW(&ofn)) {
+    return std::nullopt;
+  }
+
+  auto out = to_utf8(file_buf);
+  if (out.empty()) {
+    return std::nullopt;
+  }
+  return out;
+#else
+  (void)title;
+  (void)images_only;
+  return std::nullopt;
+#endif
 }
 
 inline void capture_pointer() {
@@ -1850,6 +2701,71 @@ inline void release_pointer() {
       detail::active_dispatch_context->pointer_id);
 }
 
+inline void call_handler(std::uint64_t handler_id) {
+  if (!detail::active_dispatch_context ||
+      !detail::active_dispatch_context->instance) {
+    return;
+  }
+  detail::active_dispatch_context->instance->invoke_handler(handler_id);
+}
+
+inline double now_ms() {
+  using clock = std::chrono::steady_clock;
+  static const auto t0 = clock::now();
+  const auto dt = clock::now() - t0;
+  return std::chrono::duration<double, std::milli>(dt).count();
+}
+
+template <typename Fn>
+inline void withAnimation(AnimationSpec spec, Fn &&fn) {
+  const auto prev = detail::active_animation_spec;
+  detail::active_animation_spec = std::move(spec);
+  fn();
+  detail::active_animation_spec = prev;
+}
+
+template <typename Fn> inline void withAnimation(Fn &&fn) {
+  withAnimation(AnimationSpec{}, std::forward<Fn>(fn));
+}
+
+inline ViewNode animation(ViewNode node, AnimationSpec spec) {
+  node.props.insert_or_assign("animation_enabled", PropValue{true});
+  node.props.insert_or_assign("animation_duration_ms", PropValue{spec.duration_ms});
+  node.props.insert_or_assign("animation_delay_ms", PropValue{spec.delay_ms});
+  node.props.insert_or_assign("animation_curve", PropValue{std::move(spec.curve)});
+  return node;
+}
+
+inline ViewNode animation(ViewNode node, bool enabled) {
+  node.props.insert_or_assign("animation_enabled", PropValue{enabled});
+  if (!enabled) {
+    node.props.erase("animation_duration_ms");
+    node.props.erase("animation_delay_ms");
+    node.props.erase("animation_curve");
+  }
+  return node;
+}
+
+template <typename ContentFn>
+inline ViewNode TimelineView(std::string key, double interval_ms, ContentFn fn) {
+  if (detail::active_build_instance) {
+    detail::active_build_instance->register_timeline(key, interval_ms);
+  }
+  auto now = local_state<double>(key + ":timeline_now", now_ms());
+  return fn(now.get());
+}
+
+inline ViewNode matchedGeometryEffect(ViewNode node, std::string ns, std::string id) {
+  node.props.insert_or_assign("matched_geom_ns", PropValue{std::move(ns)});
+  node.props.insert_or_assign("matched_geom_id", PropValue{std::move(id)});
+  return node;
+}
+
+inline ViewNode Transition(ViewNode node, std::string type = "opacity") {
+  node.props.insert_or_assign("transition", PropValue{std::move(type)});
+  return node;
+}
+
 inline std::optional<RectF> target_frame() {
   if (!detail::active_dispatch_context ||
       !detail::active_dispatch_context->instance) {
@@ -1857,6 +2773,423 @@ inline std::optional<RectF> target_frame() {
   }
   return detail::active_dispatch_context->instance->layout_frame_at_path(
       detail::active_dispatch_context->target_path);
+}
+
+template <typename Fn>
+inline std::uint64_t chain_handler(std::uint64_t prev_handler_id, Fn fn) {
+  return on_click([prev_handler_id, fn = std::move(fn)]() mutable {
+    if (prev_handler_id != 0) {
+      call_handler(prev_handler_id);
+    }
+    fn();
+  });
+}
+
+inline ViewNode onTapGesture(ViewNode node, std::function<void()> fn) {
+  const auto prev = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_up");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  node.events.insert_or_assign(
+      "pointer_up",
+      chain_handler(prev, [fn = std::move(fn)]() mutable {
+        if (fn) {
+          fn();
+        }
+      }));
+  return node;
+}
+
+struct DragGestureValue {
+  float start_x{};
+  float start_y{};
+  float x{};
+  float y{};
+  float dx{};
+  float dy{};
+};
+
+inline ViewNode DragGesture(ViewNode node, std::string key,
+                            std::function<void(DragGestureValue)> on_changed = {},
+                            std::function<void(DragGestureValue)> on_ended = {},
+                            float min_distance = 0.0f) {
+  if (node.key.empty() && !key.empty()) {
+    node.key = key;
+  }
+  const std::string state_key = node.key.empty() ? std::move(key) : node.key;
+
+  auto active = local_state<bool>(state_key + ":drag:active", false);
+  auto started = local_state<bool>(state_key + ":drag:started", false);
+  auto start_x = local_state<double>(state_key + ":drag:start_x", 0.0);
+  auto start_y = local_state<double>(state_key + ":drag:start_y", 0.0);
+
+  const auto prev_down = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_down");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_move = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_move");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_up = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_up");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+
+  node.events.insert_or_assign(
+      "pointer_down",
+      chain_handler(prev_down, [active, started, start_x, start_y]() mutable {
+        active.set(true);
+        started.set(false);
+        start_x.set(pointer_x());
+        start_y.set(pointer_y());
+        capture_pointer();
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_move",
+      chain_handler(prev_move, [active, started, start_x, start_y, min_distance,
+                               on_changed]() mutable {
+        if (!active.get()) {
+          return;
+        }
+        const float sx = static_cast<float>(start_x.get());
+        const float sy = static_cast<float>(start_y.get());
+        const float x = pointer_x();
+        const float y = pointer_y();
+        const float dx = x - sx;
+        const float dy = y - sy;
+
+        if (!started.get()) {
+          if (std::sqrt(dx * dx + dy * dy) < min_distance) {
+            return;
+          }
+          started.set(true);
+        }
+
+        if (on_changed) {
+          on_changed(DragGestureValue{sx, sy, x, y, dx, dy});
+        }
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_up",
+      chain_handler(prev_up, [active, started, start_x, start_y, on_ended]() mutable {
+        if (!active.get()) {
+          return;
+        }
+        active.set(false);
+        const float sx = static_cast<float>(start_x.get());
+        const float sy = static_cast<float>(start_y.get());
+        const float x = pointer_x();
+        const float y = pointer_y();
+        const float dx = x - sx;
+        const float dy = y - sy;
+        if (started.get() && on_ended) {
+          on_ended(DragGestureValue{sx, sy, x, y, dx, dy});
+        }
+        started.set(false);
+        release_pointer();
+      }));
+
+  return node;
+}
+
+inline ViewNode onLongPressGesture(ViewNode node, std::string key,
+                                  std::function<void()> fn,
+                                  double minimum_duration_ms = 500.0,
+                                  float maximum_distance = 6.0f) {
+  if (node.key.empty() && !key.empty()) {
+    node.key = key;
+  }
+  const std::string state_key = node.key.empty() ? std::move(key) : node.key;
+
+  auto pressed = local_state<bool>(state_key + ":lp:pressed", false);
+  auto start_t = local_state<double>(state_key + ":lp:start_t", 0.0);
+  auto start_x = local_state<double>(state_key + ":lp:start_x", 0.0);
+  auto start_y = local_state<double>(state_key + ":lp:start_y", 0.0);
+
+  const auto prev_down = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_down");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_move = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_move");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_up = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_up");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+
+  node.events.insert_or_assign(
+      "pointer_down",
+      chain_handler(prev_down, [pressed, start_t, start_x, start_y]() mutable {
+        pressed.set(true);
+        start_t.set(now_ms());
+        start_x.set(pointer_x());
+        start_y.set(pointer_y());
+        capture_pointer();
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_move",
+      chain_handler(prev_move, [pressed, start_x, start_y, maximum_distance]() mutable {
+        if (!pressed.get()) {
+          return;
+        }
+        const float dx = pointer_x() - static_cast<float>(start_x.get());
+        const float dy = pointer_y() - static_cast<float>(start_y.get());
+        if (std::sqrt(dx * dx + dy * dy) > maximum_distance) {
+          pressed.set(false);
+          release_pointer();
+        }
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_up",
+      chain_handler(prev_up, [pressed, start_t, minimum_duration_ms, fn = std::move(fn)]() mutable {
+        if (pressed.get()) {
+          const double dt = now_ms() - start_t.get();
+          if (dt >= minimum_duration_ms) {
+            if (fn) {
+              fn();
+            }
+          }
+        }
+        pressed.set(false);
+        release_pointer();
+      }));
+
+  return node;
+}
+
+struct MagnificationGestureValue {
+  double magnification{1.0};
+  double delta{0.0};
+};
+
+inline ViewNode MagnificationGesture(
+    ViewNode node, std::string key,
+    std::function<void(MagnificationGestureValue)> on_changed = {},
+    std::function<void(MagnificationGestureValue)> on_ended = {},
+    float sensitivity = 240.0f) {
+  if (node.key.empty() && !key.empty()) {
+    node.key = key;
+  }
+  const std::string state_key = node.key.empty() ? std::move(key) : node.key;
+
+  auto active = local_state<bool>(state_key + ":mag:active", false);
+  auto start_y = local_state<double>(state_key + ":mag:start_y", 0.0);
+  auto last = local_state<double>(state_key + ":mag:last", 1.0);
+
+  const auto prev_down = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_down");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_move = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_move");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_up = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_up");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+
+  node.events.insert_or_assign(
+      "pointer_down",
+      chain_handler(prev_down, [active, start_y, last]() mutable {
+        active.set(true);
+        start_y.set(pointer_y());
+        last.set(1.0);
+        capture_pointer();
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_move",
+      chain_handler(prev_move, [active, start_y, last, sensitivity, on_changed]() mutable {
+        if (!active.get()) {
+          return;
+        }
+        const double dy = static_cast<double>(pointer_y()) - start_y.get();
+        const double m = std::exp(sensitivity != 0.0f ? (dy / static_cast<double>(sensitivity)) : 0.0);
+        const double d = m - last.get();
+        last.set(m);
+        if (on_changed) {
+          on_changed(MagnificationGestureValue{m, d});
+        }
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_up",
+      chain_handler(prev_up, [active, last, on_ended]() mutable {
+        if (!active.get()) {
+          return;
+        }
+        active.set(false);
+        if (on_ended) {
+          on_ended(MagnificationGestureValue{last.get(), 0.0});
+        }
+        last.set(1.0);
+        release_pointer();
+      }));
+
+  return node;
+}
+
+struct RotationGestureValue {
+  double radians{0.0};
+  double delta{0.0};
+};
+
+inline ViewNode RotationGesture(
+    ViewNode node, std::string key,
+    std::function<void(RotationGestureValue)> on_changed = {},
+    std::function<void(RotationGestureValue)> on_ended = {},
+    float sensitivity = 240.0f) {
+  if (node.key.empty() && !key.empty()) {
+    node.key = key;
+  }
+  const std::string state_key = node.key.empty() ? std::move(key) : node.key;
+
+  auto active = local_state<bool>(state_key + ":rot:active", false);
+  auto start_x = local_state<double>(state_key + ":rot:start_x", 0.0);
+  auto last = local_state<double>(state_key + ":rot:last", 0.0);
+
+  const auto prev_down = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_down");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_move = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_move");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+  const auto prev_up = [&]() -> std::uint64_t {
+    if (const auto it = node.events.find("pointer_up");
+        it != node.events.end()) {
+      return it->second;
+    }
+    return 0;
+  }();
+
+  node.events.insert_or_assign(
+      "pointer_down",
+      chain_handler(prev_down, [active, start_x, last]() mutable {
+        active.set(true);
+        start_x.set(pointer_x());
+        last.set(0.0);
+        capture_pointer();
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_move",
+      chain_handler(prev_move, [active, start_x, last, sensitivity, on_changed]() mutable {
+        if (!active.get()) {
+          return;
+        }
+        const double dx = static_cast<double>(pointer_x()) - start_x.get();
+        const double r = sensitivity != 0.0f ? (dx / static_cast<double>(sensitivity)) : 0.0;
+        const double d = r - last.get();
+        last.set(r);
+        if (on_changed) {
+          on_changed(RotationGestureValue{r, d});
+        }
+      }));
+
+  node.events.insert_or_assign(
+      "pointer_up",
+      chain_handler(prev_up, [active, last, on_ended]() mutable {
+        if (!active.get()) {
+          return;
+        }
+        active.set(false);
+        if (on_ended) {
+          on_ended(RotationGestureValue{last.get(), 0.0});
+        }
+        last.set(0.0);
+        release_pointer();
+      }));
+
+  return node;
+}
+
+template <typename ApplyGestureFn>
+inline ViewNode gesture(ViewNode node, ApplyGestureFn fn) {
+  return fn(std::move(node));
+}
+
+inline ViewNode Link(std::string title, std::string url) {
+  auto b = view("Text");
+  b.prop("value", std::move(title));
+  b.prop("color", 0xFF80A0FF);
+  b.event("pointer_up", on_pointer_up([url = std::move(url)]() mutable {
+            open_url(url);
+          }));
+  return std::move(b).build();
+}
+
+inline ViewNode ShareLink(std::string title, std::string url,
+                          bool open_after_copy = false) {
+  auto b = view("Text");
+  b.prop("value", std::move(title));
+  b.prop("color", 0xFF80A0FF);
+  b.event("pointer_up",
+          on_pointer_up([url = std::move(url), open_after_copy]() mutable {
+            set_clipboard_text(url);
+            if (open_after_copy) {
+              open_url(url);
+            }
+          }));
+  return std::move(b).build();
+}
+
+inline ViewNode PhotosPicker(StateHandle<std::string> selection,
+                             std::string title = "Pick Photo") {
+  auto b = view("Text");
+  b.prop("value", std::move(title));
+  b.prop("color", 0xFF80A0FF);
+  b.event("pointer_up", on_pointer_up([selection]() mutable {
+            if (auto p = open_file_dialog("Pick Photo", true)) {
+              selection.set(*p);
+            }
+          }));
+  return std::move(b).build();
 }
 
 inline ViewNode TextField(StateHandle<std::string> value, std::string key,

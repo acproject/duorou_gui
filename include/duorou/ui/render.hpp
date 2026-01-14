@@ -14,13 +14,54 @@
 
 namespace duorou::ui {
 
+inline std::uint8_t apply_opacity_u8(std::uint8_t a, float opacity) {
+  const float x = static_cast<float>(a) * std::max(0.0f, std::min(1.0f, opacity));
+  const int ai = static_cast<int>(std::lround(x));
+  return clamp_u8(ai);
+}
+
+inline void apply_opacity(RenderOp &op, float opacity) {
+  if (opacity >= 1.0f) {
+    return;
+  }
+  std::visit(
+      [&](auto &v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, DrawRect>) {
+          v.fill.a = apply_opacity_u8(v.fill.a, opacity);
+        } else if constexpr (std::is_same_v<T, DrawText>) {
+          v.color.a = apply_opacity_u8(v.color.a, opacity);
+          v.caret_color.a = apply_opacity_u8(v.caret_color.a, opacity);
+          v.sel_color.a = apply_opacity_u8(v.sel_color.a, opacity);
+        } else if constexpr (std::is_same_v<T, DrawImage>) {
+          v.tint.a = apply_opacity_u8(v.tint.a, opacity);
+        }
+      },
+      op);
+}
+
+inline RectF apply_offset(RectF r, float ox, float oy) {
+  r.x += ox;
+  r.y += oy;
+  return r;
+}
+
 inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
-                             std::vector<RenderOp> &out) {
+                             float parent_opacity, float parent_ox,
+                             float parent_oy, std::vector<RenderOp> &out) {
   const bool clip = prop_as_bool(v.props, "clip", false);
+  const float opacity =
+      parent_opacity * prop_as_float(v.props, "opacity", 1.0f);
+  const float ox = parent_ox + prop_as_float(v.props, "render_offset_x", 0.0f);
+  const float oy = parent_oy + prop_as_float(v.props, "render_offset_y", 0.0f);
+
+  const RectF frame = apply_offset(l.frame, ox, oy);
+
   if (clip) {
-    out.push_back(PushClip{l.frame});
+    out.push_back(PushClip{frame});
   }
 
+  const auto start0 = out.size();
   emit_render_ops_box(v, l, out);
   emit_render_ops_divider(v, l, out);
   emit_render_ops_checkbox(v, l, out);
@@ -31,14 +72,48 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
   emit_render_ops_button(v, l, out);
   emit_render_ops_stepper(v, l, out);
   emit_render_ops_image(v, l, out);
+  emit_render_ops_canvas(v, l, out);
   emit_render_ops_text(v, l, out);
+  for (std::size_t i = start0; i < out.size(); ++i) {
+    apply_opacity(out[i], opacity);
+    std::visit(
+        [&](auto &op) {
+          using T = std::decay_t<decltype(op)>;
+          if constexpr (std::is_same_v<T, PushClip>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          } else if constexpr (std::is_same_v<T, DrawRect>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          } else if constexpr (std::is_same_v<T, DrawText>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          } else if constexpr (std::is_same_v<T, DrawImage>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          }
+        },
+        out[i]);
+  }
 
   const auto n = std::min(v.children.size(), l.children.size());
   for (std::size_t i = 0; i < n; ++i) {
-    build_render_ops(v.children[i], l.children[i], out);
+    build_render_ops(v.children[i], l.children[i], opacity, ox, oy, out);
   }
 
+  const auto start1 = out.size();
   emit_render_ops_scrollview(v, l, out);
+  for (std::size_t i = start1; i < out.size(); ++i) {
+    apply_opacity(out[i], opacity);
+    std::visit(
+        [&](auto &op) {
+          using T = std::decay_t<decltype(op)>;
+          if constexpr (std::is_same_v<T, DrawRect>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          } else if constexpr (std::is_same_v<T, DrawText>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          } else if constexpr (std::is_same_v<T, DrawImage>) {
+            op.rect = apply_offset(op.rect, ox, oy);
+          }
+        },
+        out[i]);
+  }
 
   if (clip) {
     out.push_back(PopClip{});
@@ -49,7 +124,7 @@ inline std::vector<RenderOp> build_render_ops(const ViewNode &root,
                                               const LayoutNode &layout_root) {
   std::vector<RenderOp> out;
   out.push_back(PushClip{layout_root.frame});
-  build_render_ops(root, layout_root, out);
+  build_render_ops(root, layout_root, 1.0f, 0.0f, 0.0f, out);
   out.push_back(PopClip{});
   return out;
 }

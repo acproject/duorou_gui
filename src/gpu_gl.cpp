@@ -19,6 +19,7 @@ int main() { return 0; }
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -1443,6 +1444,12 @@ int main(int argc, char **argv) {
   auto field_caret = state<std::int64_t>(0);
   auto progress = state<double>(0.25);
   auto stepper_value = state<double>(3.0);
+  auto tap_count = state<std::int64_t>(0);
+  auto long_press_count = state<std::int64_t>(0);
+  auto drag_dx = state<double>(0.0);
+  auto drag_dy = state<double>(0.0);
+  auto magnification = state<double>(1.0);
+  auto rotation = state<double>(0.0);
   auto secure_value = state<std::string>(std::string{});
   auto secure_focused = state<bool>(false);
   auto secure_caret = state<std::int64_t>(0);
@@ -1457,6 +1464,13 @@ int main(int argc, char **argv) {
   auto sheet_presented = state<bool>(false);
   auto alert_presented = state<bool>(false);
   auto fullscreen_presented = state<bool>(false);
+  auto popover_presented = state<bool>(false);
+  auto popover_x = state<double>(0.0);
+  auto popover_y = state<double>(0.0);
+  auto file_dialog_presented = state<bool>(false);
+  auto file_dialog_dir = state<std::string>(std::filesystem::current_path().string());
+  auto file_dialog_selected = state<std::string>(std::string{});
+  auto file_dialog_result = state<std::string>(std::string{});
 
   GLTextCache text_cache;
 
@@ -1636,6 +1650,108 @@ int main(int argc, char **argv) {
                          stepper_value.set(std::max(0.0, next));
                        }))
                 .build(),
+
+            view("Divider").prop("thickness", 1.0).prop("color", 0xFF3A3A3A).build(),
+
+            view("Text")
+                .prop("value", "Gestures demo (tap / long press / drag)")
+                .prop("font_size", 16.0)
+                .build(),
+
+            [&]() {
+              auto area = view("Box")
+                              .key("gesture_area")
+                              .prop("width", 360.0)
+                              .prop("height", 120.0)
+                              .prop("padding", 12.0)
+                              .prop("bg", 0xFF141414)
+                              .prop("border", 0xFF2A2A2A)
+                              .prop("border_width", 1.0)
+                              .children({
+                                  view("Column")
+                                      .prop("spacing", 6.0)
+                                      .prop("cross_align", "start")
+                                      .children({
+                                          view("Text")
+                                              .prop("value", std::string{"Tap: "} + std::to_string(tap_count.get()))
+                                              .prop("font_size", 12.0)
+                                              .prop("color", 0xFFB0B0B0)
+                                              .build(),
+                                          view("Text")
+                                              .prop("value", std::string{"LongPress: "} + std::to_string(long_press_count.get()))
+                                              .prop("font_size", 12.0)
+                                              .prop("color", 0xFFB0B0B0)
+                                              .build(),
+                                          view("Text")
+                                              .prop("value",
+                                                    std::string{"Drag dx/dy: "} +
+                                                        std::to_string(static_cast<int>(drag_dx.get())) + ", " +
+                                                        std::to_string(static_cast<int>(drag_dy.get())))
+                                              .prop("font_size", 12.0)
+                                              .prop("color", 0xFFB0B0B0)
+                                              .build(),
+                                          view("Text")
+                                              .prop("value",
+                                                    std::string{"Magnification: "} +
+                                                        std::to_string(magnification.get()) +
+                                                        "  Rotation(rad): " +
+                                                        std::to_string(rotation.get()))
+                                              .prop("font_size", 12.0)
+                                              .prop("color", 0xFFB0B0B0)
+                                              .build(),
+                                      })
+                                      .build(),
+                              })
+                              .build();
+
+              area = duorou::ui::onTapGesture(std::move(area), [tap_count]() mutable {
+                tap_count.set(tap_count.get() + 1);
+              });
+
+              area = duorou::ui::onLongPressGesture(
+                  std::move(area),
+                  "gesture_area",
+                  [long_press_count]() mutable {
+                    long_press_count.set(long_press_count.get() + 1);
+                  },
+                  500.0,
+                  6.0f);
+
+              area = duorou::ui::DragGesture(
+                  std::move(area),
+                  "gesture_area",
+                  [drag_dx, drag_dy](duorou::ui::DragGestureValue v) mutable {
+                    drag_dx.set(v.dx);
+                    drag_dy.set(v.dy);
+                  },
+                  [drag_dx, drag_dy](duorou::ui::DragGestureValue v) mutable {
+                    drag_dx.set(v.dx);
+                    drag_dy.set(v.dy);
+                  },
+                  1.5f);
+
+              area = duorou::ui::MagnificationGesture(
+                  std::move(area),
+                  "gesture_area",
+                  [magnification](duorou::ui::MagnificationGestureValue v) mutable {
+                    magnification.set(v.magnification);
+                  },
+                  [magnification](duorou::ui::MagnificationGestureValue v) mutable {
+                    magnification.set(v.magnification);
+                  });
+
+              area = duorou::ui::RotationGesture(
+                  std::move(area),
+                  "gesture_area",
+                  [rotation](duorou::ui::RotationGestureValue v) mutable {
+                    rotation.set(v.radians);
+                  },
+                  [rotation](duorou::ui::RotationGestureValue v) mutable {
+                    rotation.set(v.radians);
+                  });
+
+              return area;
+            }(),
 
             view("Text")
                 .prop("value", std::string{"TextField: "} + field.get())
@@ -2102,31 +2218,73 @@ int main(int argc, char **argv) {
                                 .build(),
                             view("Text")
                                 .prop("value",
-                                      "Open a Sheet. Tap scrim to dismiss.")
+                                      "Modals and popovers. Tap background to dismiss.")
                                 .prop("font_size", 12.0)
                                 .prop("color", 0xFFB0B0B0)
                                 .build(),
                             view("Button")
                                 .prop("title", "Open Sheet")
-                                .event("pointer_up", on_pointer_up([sheet_presented]() mutable {
+                                .event("pointer_up", on_pointer_up([sheet_presented, alert_presented, fullscreen_presented, popover_presented, file_dialog_presented]() mutable {
+                                         alert_presented.set(false);
+                                         fullscreen_presented.set(false);
+                                         popover_presented.set(false);
+                                         file_dialog_presented.set(false);
                                          sheet_presented.set(true);
                                        }))
                                 .build(),
                             view("Button")
                                 .prop("title", "Open Alert")
-                                .event("pointer_up", on_pointer_up([alert_presented, sheet_presented, fullscreen_presented]() mutable {
+                                .event("pointer_up", on_pointer_up([alert_presented, sheet_presented, fullscreen_presented, popover_presented, file_dialog_presented]() mutable {
                                          sheet_presented.set(false);
                                          fullscreen_presented.set(false);
+                                         popover_presented.set(false);
+                                         file_dialog_presented.set(false);
                                          alert_presented.set(true);
                                        }))
                                 .build(),
                             view("Button")
                                 .prop("title", "Open FullScreenCover")
-                                .event("pointer_up", on_pointer_up([fullscreen_presented, sheet_presented, alert_presented]() mutable {
+                                .event("pointer_up", on_pointer_up([fullscreen_presented, sheet_presented, alert_presented, popover_presented, file_dialog_presented]() mutable {
                                          sheet_presented.set(false);
                                          alert_presented.set(false);
+                                         popover_presented.set(false);
+                                         file_dialog_presented.set(false);
                                          fullscreen_presented.set(true);
                                        }))
+                                .build(),
+                            view("Button")
+                                .prop("title", "Open Popover")
+                                .event("pointer_up", on_pointer_up([popover_presented, popover_x, popover_y, sheet_presented, alert_presented, fullscreen_presented, file_dialog_presented]() mutable {
+                                         sheet_presented.set(false);
+                                         alert_presented.set(false);
+                                         fullscreen_presented.set(false);
+                                         file_dialog_presented.set(false);
+                                         if (auto r = target_frame()) {
+                                           popover_x.set(r->x);
+                                           popover_y.set(r->y + r->h);
+                                         } else {
+                                           popover_x.set(pointer_x());
+                                           popover_y.set(pointer_y());
+                                         }
+                                         popover_presented.set(true);
+                                       }))
+                                .build(),
+                            view("Button")
+                                .prop("title", "Open File Dialog")
+                                .event("pointer_up", on_pointer_up([file_dialog_presented, file_dialog_dir, file_dialog_selected, sheet_presented, alert_presented, fullscreen_presented, popover_presented]() mutable {
+                                         sheet_presented.set(false);
+                                         alert_presented.set(false);
+                                         fullscreen_presented.set(false);
+                                         popover_presented.set(false);
+                                         file_dialog_selected.set(std::string{});
+                                         file_dialog_dir.set(std::filesystem::current_path().string());
+                                         file_dialog_presented.set(true);
+                                       }))
+                                .build(),
+                            view("Text")
+                                .prop("value", std::string{"Selected file: "} + file_dialog_result.get())
+                                .prop("font_size", 12.0)
+                                .prop("color", 0xFFB0B0B0)
                                 .build(),
                         })
                         .build(),
@@ -2138,7 +2296,8 @@ int main(int argc, char **argv) {
         .build();
 
     if (!sheet_presented.get() && !alert_presented.get() &&
-        !fullscreen_presented.get()) {
+        !fullscreen_presented.get() && !popover_presented.get() &&
+        !file_dialog_presented.get()) {
       return base;
     }
 
@@ -2236,6 +2395,183 @@ int main(int argc, char **argv) {
                         .build(),
                 },
                 on_pointer_up([alert_presented]() mutable { alert_presented.set(false); })));
+          }
+
+          if (popover_presented.get()) {
+            c.add(duorou::ui::Popover(
+                {
+                    view("Text")
+                        .prop("value", "Popover")
+                        .prop("font_size", 14.0)
+                        .build(),
+                    view("Text")
+                        .prop("value", "Click background to close")
+                        .prop("font_size", 12.0)
+                        .prop("color", 0xFFB0B0B0)
+                        .build(),
+                },
+                static_cast<float>(popover_x.get()),
+                static_cast<float>(popover_y.get()),
+                on_pointer_down([]() { capture_pointer(); }),
+                on_pointer_up([popover_presented]() mutable {
+                  popover_presented.set(false);
+                  release_pointer();
+                }),
+                0x22000000,
+                0xFF202020));
+          }
+
+          if (file_dialog_presented.get()) {
+            using fs_path = std::filesystem::path;
+            fs_path cur = fs_path{file_dialog_dir.get()};
+            std::error_code ec;
+            if (!std::filesystem::exists(cur, ec) || ec) {
+              ec.clear();
+              cur = std::filesystem::current_path(ec);
+              if (ec) {
+                cur = fs_path{};
+              }
+            }
+
+            struct FileItem {
+              std::string name;
+              std::string full;
+              bool is_dir{};
+            };
+            std::vector<FileItem> items;
+            if (!cur.empty()) {
+              for (const auto &entry : std::filesystem::directory_iterator(cur, ec)) {
+                if (ec) {
+                  break;
+                }
+                FileItem it;
+                it.is_dir = entry.is_directory(ec) && !ec;
+                ec.clear();
+                it.name = entry.path().filename().string();
+                it.full = entry.path().string();
+                if (it.name.empty()) {
+                  it.name = it.full;
+                }
+                items.push_back(std::move(it));
+              }
+            }
+            std::sort(items.begin(), items.end(), [](const FileItem &a, const FileItem &b) {
+              if (a.is_dir != b.is_dir) {
+                return a.is_dir > b.is_dir;
+              }
+              return a.name < b.name;
+            });
+
+            const auto cur_str = cur.string();
+            const auto parent = cur.parent_path();
+            const bool has_parent = !cur.empty() && !parent.empty() && parent != cur;
+
+            c.add(duorou::ui::AlertDialog(
+                {
+                    view("Text")
+                        .prop("value", "Open File")
+                        .prop("font_size", 16.0)
+                        .build(),
+                    view("Text")
+                        .prop("value", cur_str)
+                        .prop("font_size", 12.0)
+                        .prop("color", 0xFFB0B0B0)
+                        .build(),
+                    view("Row")
+                        .prop("spacing", 8.0)
+                        .prop("cross_align", "center")
+                        .children({
+                            view("Button")
+                                .prop("title", "Up")
+                                .prop("opacity", has_parent ? 1.0 : 0.4)
+                                .prop("hit_test", has_parent)
+                                .event("pointer_up", on_pointer_up([file_dialog_dir, file_dialog_selected, parent]() mutable {
+                                         file_dialog_selected.set(std::string{});
+                                         file_dialog_dir.set(parent.string());
+                                       }))
+                                .build(),
+                            view("Text")
+                                .prop("value", std::string{"Selected: "} + file_dialog_selected.get())
+                                .prop("font_size", 12.0)
+                                .prop("color", 0xFFB0B0B0)
+                                .build(),
+                        })
+                        .build(),
+                    view("ScrollView")
+                        .key("file_dialog_scroll")
+                        .prop("clip", true)
+                        .prop("height", 260.0)
+                        .children([&](auto &sc) {
+                          if (items.empty()) {
+                            sc.add(view("Text")
+                                       .prop("value", cur.empty() ? "Invalid directory" : "Empty")
+                                       .prop("font_size", 12.0)
+                                       .prop("color", 0xFFB0B0B0)
+                                       .build());
+                            return;
+                          }
+
+                          for (const auto &it : items) {
+                            const bool selected = !it.is_dir && file_dialog_selected.get() == it.full;
+                            auto row =
+                                view("Box")
+                                    .prop("padding", 8.0)
+                                    .prop("bg", selected ? 0xFF2A2A2A : 0xFF1E1E1E)
+                                    .prop("border", selected ? 0xFF80A0FF : 0xFF3A3A3A)
+                                    .prop("border_width", selected ? 1.0 : 0.0)
+                                    .children({
+                                        view("Row")
+                                            .prop("spacing", 8.0)
+                                            .prop("cross_align", "center")
+                                            .children({
+                                                view("Text")
+                                                    .prop("value", it.is_dir ? "[DIR]" : "     ")
+                                                    .prop("font_size", 12.0)
+                                                    .prop("color", 0xFFB0B0B0)
+                                                    .build(),
+                                                view("Text")
+                                                    .prop("value", it.name)
+                                                    .prop("font_size", 14.0)
+                                                    .build(),
+                                            })
+                                            .build(),
+                                    })
+                                    .event("pointer_up", on_pointer_up([file_dialog_dir, file_dialog_selected, full = it.full, is_dir = it.is_dir]() mutable {
+                                      if (is_dir) {
+                                        file_dialog_selected.set(std::string{});
+                                        file_dialog_dir.set(full);
+                                      } else {
+                                        file_dialog_selected.set(full);
+                                      }
+                                    }))
+                                    .build();
+                            sc.add(std::move(row));
+                          }
+                        })
+                        .build(),
+                    view("Row")
+                        .prop("spacing", 8.0)
+                        .prop("cross_align", "center")
+                        .children({
+                            view("Spacer").build(),
+                            view("Button")
+                                .prop("title", "Cancel")
+                                .event("pointer_up", on_pointer_up([file_dialog_presented]() mutable {
+                                         file_dialog_presented.set(false);
+                                       }))
+                                .build(),
+                            view("Button")
+                                .prop("title", "Open")
+                                .event("pointer_up", on_pointer_up([file_dialog_presented, file_dialog_selected, file_dialog_result]() mutable {
+                                         file_dialog_result.set(file_dialog_selected.get());
+                                         file_dialog_presented.set(false);
+                                       }))
+                                .build(),
+                        })
+                        .build(),
+                },
+                on_pointer_up([file_dialog_presented]() mutable { file_dialog_presented.set(false); }),
+                560.0f));
           }
         })
         .build();

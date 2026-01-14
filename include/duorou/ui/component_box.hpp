@@ -54,8 +54,9 @@ inline ViewNode Sheet(std::initializer_list<ViewNode> sheet_children,
 
   auto sheet_layer = view("Column")
                          .prop("cross_align", "stretch")
+                         .prop("hit_test", false)
                          .children([&](auto &c) {
-                           c.add(view("Spacer").build());
+                           c.add(view("Spacer").prop("hit_test", false).build());
                            c.add(std::move(panel));
                          })
                          .build();
@@ -113,17 +114,19 @@ inline ViewNode AlertDialog(std::initializer_list<ViewNode> alert_children,
   auto center =
       view("Column")
           .prop("cross_align", "stretch")
+          .prop("hit_test", false)
           .children([&](auto &c) {
-            c.add(view("Spacer").build());
+            c.add(view("Spacer").prop("hit_test", false).build());
             c.add(view("Row")
                       .prop("cross_align", "stretch")
+                      .prop("hit_test", false)
                       .children([&](auto &r) {
-                        r.add(view("Spacer").build());
+                        r.add(view("Spacer").prop("hit_test", false).build());
                         r.add(std::move(panel));
-                        r.add(view("Spacer").build());
+                        r.add(view("Spacer").prop("hit_test", false).build());
                       })
                       .build());
-            c.add(view("Spacer").build());
+            c.add(view("Spacer").prop("hit_test", false).build());
           })
           .build();
 
@@ -131,6 +134,59 @@ inline ViewNode AlertDialog(std::initializer_list<ViewNode> alert_children,
       .children([&](auto &c) {
         c.add(std::move(scrim));
         c.add(std::move(center));
+      })
+      .build();
+}
+
+inline ViewNode Popover(std::initializer_list<ViewNode> pop_children,
+                        float anchor_x, float anchor_y,
+                        std::uint64_t scrim_pointer_down = 0,
+                        std::uint64_t scrim_pointer_up = 0,
+                        std::int64_t scrim_bg = 0x22000000,
+                        std::int64_t bubble_bg = 0xFF202020) {
+  auto scrim = view("Box")
+                   .prop("bg", scrim_bg)
+                   .event("pointer_down", scrim_pointer_down)
+                   .event("pointer_up", scrim_pointer_up)
+                   .build();
+
+  auto content = view("Column")
+                     .prop("spacing", 8.0)
+                     .prop("cross_align", "start")
+                     .children(pop_children)
+                     .build();
+
+  auto bubble = view("Box")
+                    .prop("padding", 12.0)
+                    .prop("bg", bubble_bg)
+                    .prop("border", 0xFF3A3A3A)
+                    .prop("border_width", 1.0)
+                    .children({std::move(content)})
+                    .build();
+
+  auto positioned =
+      view("Column")
+          .prop("cross_align", "stretch")
+          .prop("hit_test", false)
+          .children([&](auto &c) {
+            c.add(view("Spacer").prop("height", anchor_y).prop("hit_test", false).build());
+            c.add(view("Row")
+                      .prop("cross_align", "stretch")
+                      .prop("hit_test", false)
+                      .children([&](auto &r) {
+                        r.add(view("Spacer").prop("width", anchor_x).prop("hit_test", false).build());
+                        r.add(std::move(bubble));
+                        r.add(view("Spacer").prop("hit_test", false).build());
+                      })
+                      .build());
+            c.add(view("Spacer").prop("hit_test", false).build());
+          })
+          .build();
+
+  return view("Overlay")
+      .children([&](auto &c) {
+        c.add(std::move(scrim));
+        c.add(std::move(positioned));
       })
       .build();
 }

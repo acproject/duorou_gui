@@ -6,6 +6,7 @@
 
 #include <duorou/ui/component_box.hpp>
 #include <duorou/ui/component_button.hpp>
+#include <duorou/ui/component_canvas.hpp>
 #include <duorou/ui/component_checkbox.hpp>
 #include <duorou/ui/component_column.hpp>
 #include <duorou/ui/component_divider.hpp>
@@ -45,6 +46,9 @@ inline SizeF measure_leaf(const ViewNode &node, ConstraintsF constraints) {
     return out;
   }
   if (measure_leaf_progressview(node, constraints, out)) {
+    return out;
+  }
+  if (measure_leaf_canvas(node, constraints, out)) {
     return out;
   }
   if (measure_leaf_textfield(node, constraints, out)) {

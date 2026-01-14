@@ -151,41 +151,58 @@
 | Sheet | Sheet | ✅ | 由 Overlay + Column/Spacer + Box 组合实现 |
 | FullScreenCover | FullScreenCover | ✅ | 由 Overlay + 全屏 Box 组合实现 |
 | Alert | AlertDialog | ✅ | 由 Overlay + Box + Button 组合实现 |
+| Popover | Popover | ✅ | 由 Overlay + Spacer 定位组合实现 |
 
 示例：运行 `duorou_gpu_demo`，在 “Modal / Overlay demo” 区域点击 `Open Sheet` / `Open Alert` / `Open FullScreenCover`。
 7️⃣ 交互与手势
-组件	作用	说明
-onTapGesture	点击	手势
-onLongPressGesture	长按	
-DragGesture	拖拽	
-MagnificationGesture	缩放	
-RotationGesture	旋转	
-gesture()	组合手势	
+
+### duorou_gui 对照（交互与手势）
+
+| SwiftUI | duorou_gui | 状态 | 备注 |
+|---|---|---|---|
+| onTapGesture | onTapGesture(ViewNode, fn) | ✅ | 基于 pointer_up；会保留原有 pointer_up 处理 |
+| onLongPressGesture | onLongPressGesture(ViewNode, key, fn, ms, maxDistance) | ✅ | pointer_down 记录开始时间，pointer_up 判定触发；超距移动会取消 |
+| DragGesture | DragGesture(ViewNode, key, onChanged, onEnded, minDistance) | ✅ | 基于 pointer_down/move/up；内部 capture_pointer 防丢事件 |
+| MagnificationGesture | MagnificationGesture(ViewNode, key, onChanged, onEnded) | ✅ | 当前为单指位移模拟缩放（占位实现，便于后续接入真实缩放事件） |
+| RotationGesture | RotationGesture(ViewNode, key, onChanged, onEnded) | ✅ | 当前为单指位移模拟旋转（占位实现，便于后续接入真实旋转事件） |
+| gesture() | gesture(ViewNode, fn) | ✅ | 通过函数式封装组合多个手势安装 |
 8️⃣ 动画 & 视觉效果
-组件	作用	说明
-withAnimation	动画包裹	
-.animation()	绑定动画	
-matchedGeometryEffect	视图过渡	
-Transition	转场动画	
-TimelineView	时间驱动	
-Canvas	自定义绘制	
+
+### duorou_gui 对照（动画 & 视觉效果）
+
+| SwiftUI | duorou_gui | 状态 | 备注 |
+|---|---|---|---|
+| withAnimation | withAnimation(AnimationSpec, fn) | ✅ | 包裹状态修改；会把动画 spec 交给本次重建 |
+| .animation() | animation(ViewNode, AnimationSpec) | ✅ | 为节点/子树提供默认动画 spec |
+| matchedGeometryEffect | matchedGeometryEffect(ViewNode, ns, id) | ✅ | 基于 render_offset_x/y 的位置补间（仅位移动画） |
+| Transition | Transition(ViewNode, type) | ⚠️ | 目前仅支持插入时 opacity 过渡（删除不保留旧节点） |
+| TimelineView | TimelineView(key, interval_ms, fn(now_ms)) | ✅ | update() 内按间隔触发重建 |
+| Canvas | Canvas(key, drawFn, default_width, default_height) | ✅ | drawFn 直接输出 RenderOp（Rect/Text/Image/Clip） |
 9️⃣ 系统集成类
-组件	作用	说明
-Map	地图	MapKit
-VideoPlayer	视频播放	AVKit
-PhotosPicker	相册	
-ShareLink	分享	
-Link	外部链接	
+
+### duorou_gui 对照（系统集成类）
+
+| SwiftUI | duorou_gui | 状态 | 备注 |
+|---|---|---|---|
+| Map | （未内置） | ⏳ | 需接入地图 SDK 或 WebView/纹理绘制方案 |
+| VideoPlayer | （未内置） | ⏳ | 需解码并持续更新 TextureHandle（可接入平台播放器/FFmpeg） |
+| PhotosPicker | PhotosPicker(StateHandle<string>, title) | ✅ | Windows: 原生文件对话框筛选图片；其他平台暂不支持 |
+| ShareLink | ShareLink(title, url, openAfterCopy) | ✅ | Windows: 复制到剪贴板；可选同时 open_url；其他平台暂不支持 |
+| Link | Link(title, url) | ✅ | 点击调用 open_url 打开外部链接 |
 🔟 状态管理 & 架构相关
-组件	作用	说明
-Form	表单	自动布局
-FocusState	焦点管理	
-@State	本地状态	
-@Binding	双向绑定	
-@ObservedObject	观察对象	
-@StateObject	状态对象	
-@Environment	环境变量	
-@EnvironmentObject	全局共享	
+
+### duorou_gui 对照（状态管理 & 架构相关）
+
+| SwiftUI | duorou_gui | 状态 | 备注 |
+|---|---|---|---|
+| Form | Form(children) | ✅ | ScrollView + Column 组合，默认 padding/spacing |
+| FocusState | FocusState(key, initial) + focusable(node, focus, id) | ✅ | focus 存当前焦点 id；由 focus/blur 事件更新 |
+| @State | local_state(key, initial) / state(initial) | ✅ | 自动依赖收集；set 后触发重建 |
+| @Binding | bind(StateHandle<string>) + BindingId(TextField/TextEditor) | ✅ | 当前内置绑定主要覆盖 string 输入场景 |
+| @ObservedObject | ObservedObject(shared_ptr<T>) | ✅ | T 需继承 StateBase/ObservableObject，notify() 触发重建 |
+| @StateObject | StateObject<T>(key, args...) | ✅ | 基于 local_state 持久化 shared_ptr<T> |
+| @Environment | provide_environment(key, value) + Environment(key, fallback) | ✅ | 当前为 ViewInstance 级别键值（非层级栈） |
+| @EnvironmentObject | provide_environment_object<T>(key, obj) + EnvironmentObject<T>(key) | ✅ | 读取会建立依赖，obj notify() 触发重建 |
 
 ---
 
@@ -220,6 +237,7 @@ duorou_gui 目前的组件类型由 `ViewNode.type` 决定（例如 `"Text"` / `
 | Sheet | Sheet | 组合组件（Overlay + Column/Spacer + Box） |
 | FullScreenCover | FullScreenCover | 组合组件（Overlay + 全屏 Box） |
 | Alert | AlertDialog | 组合组件（Overlay + 居中布局 + Box） |
+| Popover | Popover | 组合组件（Overlay + Spacer 定位 + Box） |
 
 duorou_gui 未覆盖的 SwiftUI 常用项（待扩展）
 

@@ -7,6 +7,7 @@
 
 #include <duorou/ui/component_box.hpp>
 #include <duorou/ui/component_button.hpp>
+#include <duorou/ui/component_canvas.hpp>
 #include <duorou/ui/component_checkbox.hpp>
 #include <duorou/ui/component_column.hpp>
 #include <duorou/ui/component_divider.hpp>
@@ -36,6 +37,39 @@ inline ViewNode List(std::initializer_list<ViewNode> children) {
   b.prop("clip", true);
   b.children({std::move(content).build()});
   return std::move(b).build();
+}
+
+inline ViewNode Form(std::initializer_list<ViewNode> children) {
+  auto content = view("Column");
+  content.prop("padding", 12.0);
+  content.prop("spacing", 10.0);
+  content.prop("cross_align", "stretch");
+  content.children(children);
+
+  auto b = view("ScrollView");
+  b.prop("clip", true);
+  b.children({std::move(content).build()});
+  return std::move(b).build();
+}
+
+inline ViewNode Canvas(std::string key, CanvasDrawFn draw,
+                       double default_width = 200.0,
+                       double default_height = 200.0) {
+  auto b = view("Canvas");
+  b.prop("default_width", default_width);
+  b.prop("default_height", default_height);
+  auto node = std::move(b).build();
+
+  if (key.empty()) {
+    key = std::string{"canvas:"} + std::to_string(node.id);
+  }
+  node.key = key;
+
+  const auto id_u64 = canvas_hash64(key) & 0x7FFFFFFFFFFFFFFFull;
+  const auto id_i64 = static_cast<std::int64_t>(id_u64);
+  node.props.insert_or_assign("canvas_id", PropValue{id_i64});
+  register_canvas_draw(static_cast<std::uint64_t>(id_u64), std::move(draw));
+  return node;
 }
 
 inline ViewNode Section(std::string header, std::initializer_list<ViewNode> children) {
