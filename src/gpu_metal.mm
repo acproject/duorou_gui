@@ -504,6 +504,14 @@ static id<MTLTexture> duorou_make_text_texture(id<MTLDevice> device,
   self.instance->dispatch_pointer_up(0, x, y);
 }
 
+- (void)scrollWheel:(NSEvent *)event {
+  NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+  float x = static_cast<float>(p.x);
+  float y = static_cast<float>(self.bounds.size.height - p.y);
+  const float wheel_px = 40.0f;
+  self.instance->dispatch_scroll(x, y, static_cast<float>(-event.scrollingDeltaY) * wheel_px);
+}
+
 @end
 
 static std::unique_ptr<ViewInstance> make_instance(bool use_terminal) {

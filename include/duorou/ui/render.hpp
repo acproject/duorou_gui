@@ -38,6 +38,8 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
     build_render_ops(v.children[i], l.children[i], out);
   }
 
+  emit_render_ops_scrollview(v, l, out);
+
   if (clip) {
     out.push_back(PopClip{});
   }

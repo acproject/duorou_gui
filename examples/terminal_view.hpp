@@ -260,4 +260,213 @@ inline ViewNode terminal_view() {
   return std::move(b).build();
 }
 
+inline ViewNode navigation_container_view() {
+  auto tab = local_state<std::int64_t>("nav:tab", 0);
+  auto route = local_state<std::int64_t>("nav:route", 0);
+  auto detail_id = local_state<std::int64_t>("nav:detail_id", 0);
+
+  auto set_tab = [=](std::int64_t v) mutable { tab.set(v); };
+  auto push_detail = [=](std::int64_t id) mutable {
+    detail_id.set(id);
+    route.set(1);
+  };
+  auto pop = [=]() mutable { route.set(0); };
+
+  auto top_bar = [=]() mutable {
+    if (route.get() == 0) {
+      return view("Row")
+          .prop("spacing", 10.0)
+          .prop("cross_align", "center")
+          .children({
+              view("Text")
+                  .prop("value", "Navigation & Containers")
+                  .prop("font_size", 18.0)
+                  .build(),
+              view("Spacer").build(),
+              view("Button")
+                  .prop("title", "Tab: Home")
+                  .event("pointer_up", on_pointer_up([=]() mutable { set_tab(0); }))
+                  .build(),
+              view("Button")
+                  .prop("title", "Tab: Settings")
+                  .event("pointer_up", on_pointer_up([=]() mutable { set_tab(1); }))
+                  .build(),
+          })
+          .build();
+    }
+
+    return view("Row")
+        .prop("spacing", 10.0)
+        .prop("cross_align", "center")
+        .children({
+            view("Button")
+                .prop("title", "Back")
+                .event("pointer_up", on_pointer_up([=]() mutable { pop(); }))
+                .build(),
+            view("Text")
+                .prop("value",
+                      std::string{"Detail #"} + std::to_string(detail_id.get()))
+                .prop("font_size", 18.0)
+                .build(),
+            view("Spacer").build(),
+            view("Text")
+                .prop("value", std::string{"(Tab "} + std::to_string(tab.get()) +
+                                   ")")
+                .prop("font_size", 12.0)
+                .prop("color", 0xFFB0B0B0)
+                .build(),
+        })
+        .build();
+  };
+
+  auto root = view("Column");
+  root.prop("padding", 18.0);
+  root.prop("spacing", 12.0);
+  root.prop("cross_align", "stretch");
+  root.children([&](auto &c) {
+    c.add(top_bar());
+
+    auto sv = view("ScrollView");
+    sv.key("nav_scroll");
+    sv.prop("clip", true);
+    sv.prop("padding", 10.0);
+    sv.prop("height", 520.0);
+    sv.prop("bg", 0xFF141414);
+    sv.prop("border", 0xFF2A2A2A);
+    sv.prop("border_width", 1.0);
+
+    auto content = view("Column");
+    content.prop("spacing", 12.0);
+    content.prop("cross_align", "stretch");
+
+    std::vector<ViewNode> nodes;
+    nodes.reserve(6);
+
+    nodes.push_back(duorou::ui::Group({
+        duorou::ui::Section(
+            "Container: Group + Section",
+            {
+                view("Text")
+                    .prop("value",
+                          "Group is logical; Section is a titled container.")
+                    .prop("font_size", 14.0)
+                    .prop("color", 0xFFB0B0B0)
+                    .build(),
+            }),
+    }));
+
+    if (tab.get() == 0) {
+      if (route.get() == 0) {
+        nodes.push_back(duorou::ui::Section(
+            "Navigation (模拟)",
+            {
+                view("Text")
+                    .prop("value",
+                          "Click buttons to switch views (simulate NavigationLink).")
+                    .prop("font_size", 14.0)
+                    .prop("color", 0xFFB0B0B0)
+                    .build(),
+                view("Button")
+                    .prop("title", "Open Detail 1")
+                    .event("pointer_up",
+                           on_pointer_up([=]() mutable { push_detail(1); }))
+                    .build(),
+                view("Button")
+                    .prop("title", "Open Detail 2")
+                    .event("pointer_up",
+                           on_pointer_up([=]() mutable { push_detail(2); }))
+                    .build(),
+            }));
+      } else {
+        nodes.push_back(duorou::ui::Section(
+            "Detail",
+            {
+                view("Text")
+                    .prop("value",
+                          std::string{"Detail page, detail_id="} +
+                              std::to_string(detail_id.get()))
+                    .prop("font_size", 14.0)
+                    .prop("color", 0xFFEAEAEA)
+                    .build(),
+                view("Text")
+                    .prop("value", "More content can go here; it can scroll.")
+                    .prop("font_size", 14.0)
+                    .prop("color", 0xFFB0B0B0)
+                    .build(),
+            }));
+      }
+    } else {
+      nodes.push_back(duorou::ui::Section(
+          "Tab: Settings (模拟 TabView)",
+          {
+              view("Text")
+                  .prop("value",
+                        "Switch content by tab state (simulate TabView).")
+                  .prop("font_size", 14.0)
+                  .prop("color", 0xFFB0B0B0)
+                  .build(),
+              view("Checkbox")
+                  .key("nav_setting_a")
+                  .prop("label", "Enable A")
+                  .prop("checked", true)
+                  .build(),
+              view("Checkbox")
+                  .key("nav_setting_b")
+                  .prop("label", "Enable B")
+                  .prop("checked", false)
+                  .build(),
+          }));
+    }
+
+    nodes.push_back(duorou::ui::Section(
+        "Layout (模拟 SplitView)",
+        {
+            view("Row")
+                .prop("spacing", 10.0)
+                .prop("cross_align", "stretch")
+                .children({
+                    view("Box")
+                        .prop("padding", 10.0)
+                        .prop("bg", 0xFF1E1E1E)
+                        .prop("border", 0xFF2A2A2A)
+                        .prop("border_width", 1.0)
+                        .children({
+                            view("Text")
+                                .prop("value", "Sidebar")
+                                .prop("font_size", 14.0)
+                                .prop("color", 0xFFEAEAEA)
+                                .build(),
+                        })
+                        .build(),
+                    view("Box")
+                        .prop("padding", 10.0)
+                        .prop("bg", 0xFF1E1E1E)
+                        .prop("border", 0xFF2A2A2A)
+                        .prop("border_width", 1.0)
+                        .children({
+                            view("Text")
+                                .prop("value", "Detail Pane")
+                                .prop("font_size", 14.0)
+                                .prop("color", 0xFFEAEAEA)
+                                .build(),
+                        })
+                        .build(),
+                })
+                .build(),
+        }));
+
+    content.children([&](auto &cc) {
+      for (auto &n : nodes) {
+        cc.add(std::move(n));
+      }
+    });
+
+    sv.children({std::move(content).build()});
+
+    c.add(std::move(sv).build());
+  });
+
+  return std::move(root).build();
+}
+
 } // namespace duorou::ui::examples

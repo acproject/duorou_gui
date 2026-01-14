@@ -657,6 +657,51 @@ public:
     return dispatch_text("text_input", std::move(text));
   }
 
+  bool dispatch_scroll(float x, float y, float delta_y_px) {
+    const auto hit = hit_test(tree_, layout_, x, y);
+    if (!hit) {
+      return false;
+    }
+    const auto sv_path = scrollview_path_from_hit(hit->path);
+    if (!sv_path) {
+      return false;
+    }
+
+    auto *vn = node_at_path_mut(tree_, *sv_path);
+    if (!vn || vn->type != "ScrollView") {
+      return false;
+    }
+
+    double cur = prop_as_float(vn->props, "scroll_y", 0.0f);
+    if (!find_prop(vn->props, "scroll_y") && !vn->key.empty()) {
+      if (const auto it = scroll_offsets_.find(vn->key);
+          it != scroll_offsets_.end()) {
+        cur = it->second;
+      }
+    }
+
+    float max_scroll = 0.0f;
+    if (const auto *ln = layout_at_path(layout_, *sv_path)) {
+      max_scroll = ln->scroll_max_y;
+    }
+
+    double next = cur + static_cast<double>(delta_y_px);
+    if (next < 0.0) {
+      next = 0.0;
+    }
+    if (next > static_cast<double>(max_scroll)) {
+      next = static_cast<double>(max_scroll);
+    }
+
+    vn->props.insert_or_assign("scroll_y", PropValue{next});
+    if (!vn->key.empty()) {
+      scroll_offsets_.insert_or_assign(vn->key, next);
+    }
+    layout_ = layout_tree(tree_, viewport_);
+    render_ops_ = build_render_ops(tree_, layout_);
+    return true;
+  }
+
   void capture_pointer_internal(int pointer,
                                 const std::vector<std::size_t> &path,
                                 const std::string &key) {
@@ -1155,7 +1200,7 @@ private:
         capture_pointer_internal(pointer, *path, vn->key);
       }
 
-      const double next_scroll = it->second.start_scroll_y - static_cast<double>(dy);
+      const double next_scroll = it->second.start_scroll_y + static_cast<double>(dy);
       vn->props.insert_or_assign("scroll_y", PropValue{next_scroll});
       if (!vn->key.empty()) {
         scroll_offsets_.insert_or_assign(vn->key, next_scroll);
@@ -1687,13 +1732,56 @@ private:
     };
 
     apply_text_bindings(apply_text_bindings, new_tree);
+    new_tree = normalize_root(flatten_groups(std::move(new_tree)));
+    restore_scroll_offsets(new_tree);
+
+    auto resolve_geometry_readers = [&](ViewNode &root) {
+      for (int iter = 0; iter < 4; ++iter) {
+        const auto layout0 = layout_tree(root, viewport_);
+        bool changed = false;
+
+        auto walk = [&](auto &&self, ViewNode &v, const LayoutNode &l) -> void {
+          if (v.type == "GeometryReader") {
+            if (auto raw = prop_as_i64_opt(v.props, "content_fn");
+                raw && *raw != 0) {
+              auto *fn = reinterpret_cast<std::function<ViewNode(SizeF)> *>(
+                  static_cast<std::intptr_t>(*raw));
+              const auto padding = prop_as_float(v.props, "padding", 0.0f);
+              const SizeF size{
+                  std::max(0.0f, l.frame.w - padding * 2.0f),
+                  std::max(0.0f, l.frame.h - padding * 2.0f),
+              };
+              auto child = (*fn)(size);
+              delete fn;
+              v.props.erase("content_fn");
+              v.children.clear();
+              v.children.push_back(std::move(child));
+              changed = true;
+            }
+          }
+
+          const auto n = std::min(v.children.size(), l.children.size());
+          for (std::size_t i = 0; i < n; ++i) {
+            self(self, v.children[i], l.children[i]);
+          }
+        };
+
+        walk(walk, root, layout0);
+        if (!changed) {
+          break;
+        }
+      }
+    };
+
+    resolve_geometry_readers(new_tree);
+
+    new_tree = normalize_root(flatten_groups(std::move(new_tree)));
+    restore_scroll_offsets(new_tree);
+    apply_text_bindings(apply_text_bindings, new_tree);
 
     detail::active_collector = nullptr;
     detail::active_event_collector = nullptr;
     detail::active_build_instance = nullptr;
-
-    new_tree = normalize_root(flatten_groups(std::move(new_tree)));
-    restore_scroll_offsets(new_tree);
 
     auto patches = old_tree.type.empty() ? std::vector<PatchOp>{}
                                          : diff_tree(old_tree, new_tree);

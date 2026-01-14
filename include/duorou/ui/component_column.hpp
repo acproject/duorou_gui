@@ -20,6 +20,10 @@ inline ViewNode VStack(std::initializer_list<ViewNode> children) {
   return Column(children);
 }
 
+inline ViewNode LazyVStack(std::initializer_list<ViewNode> children) {
+  return Column(children);
+}
+
 inline bool measure_node_column(const ViewNode &node, ConstraintsF constraints,
                                 SizeF &out) {
   if (node.type != "Column") {

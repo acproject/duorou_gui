@@ -26,6 +26,125 @@ inline ViewNode Overlay(std::initializer_list<ViewNode> children) {
   return std::move(b).build();
 }
 
+inline ViewNode Sheet(std::initializer_list<ViewNode> sheet_children,
+                      std::uint64_t scrim_pointer_up = 0,
+                      float sheet_height = 280.0f,
+                      std::int64_t scrim_bg = 0x99000000,
+                      std::int64_t sheet_bg = 0xFF202020) {
+  auto scrim = view("Box")
+                   .prop("bg", scrim_bg)
+                   .event("pointer_up", scrim_pointer_up)
+                   .build();
+
+  auto content = view("Column")
+                     .prop("spacing", 10.0)
+                     .prop("cross_align", "start")
+                     .children(sheet_children)
+                     .build();
+
+  auto panel =
+      view("Box")
+          .prop("padding", 16.0)
+          .prop("bg", sheet_bg)
+          .prop("border", 0xFF3A3A3A)
+          .prop("border_width", 1.0)
+          .prop("height", sheet_height)
+          .children({std::move(content)})
+          .build();
+
+  auto sheet_layer = view("Column")
+                         .prop("cross_align", "stretch")
+                         .children([&](auto &c) {
+                           c.add(view("Spacer").build());
+                           c.add(std::move(panel));
+                         })
+                         .build();
+
+  return view("Overlay")
+      .children([&](auto &c) {
+        c.add(std::move(scrim));
+        c.add(std::move(sheet_layer));
+      })
+      .build();
+}
+
+inline ViewNode FullScreenCover(std::initializer_list<ViewNode> children,
+                                std::uint64_t bg_pointer_up = 0,
+                                std::int64_t bg = 0xFF101010) {
+  auto background =
+      view("Box").prop("bg", bg).event("pointer_up", bg_pointer_up).build();
+
+  auto content = view("Box").children(children).build();
+
+  return view("Overlay")
+      .children([&](auto &c) {
+        c.add(std::move(background));
+        c.add(std::move(content));
+      })
+      .build();
+}
+
+inline ViewNode AlertDialog(std::initializer_list<ViewNode> alert_children,
+                            std::uint64_t scrim_pointer_up = 0,
+                            float width = 360.0f,
+                            std::int64_t scrim_bg = 0x99000000,
+                            std::int64_t alert_bg = 0xFF202020) {
+  auto scrim = view("Box")
+                   .prop("bg", scrim_bg)
+                   .event("pointer_up", scrim_pointer_up)
+                   .build();
+
+  auto content = view("Column")
+                     .prop("spacing", 10.0)
+                     .prop("cross_align", "start")
+                     .children(alert_children)
+                     .build();
+
+  auto panel =
+      view("Box")
+          .prop("padding", 16.0)
+          .prop("bg", alert_bg)
+          .prop("border", 0xFF3A3A3A)
+          .prop("border_width", 1.0)
+          .prop("width", width)
+          .children({std::move(content)})
+          .build();
+
+  auto center =
+      view("Column")
+          .prop("cross_align", "stretch")
+          .children([&](auto &c) {
+            c.add(view("Spacer").build());
+            c.add(view("Row")
+                      .prop("cross_align", "stretch")
+                      .children([&](auto &r) {
+                        r.add(view("Spacer").build());
+                        r.add(std::move(panel));
+                        r.add(view("Spacer").build());
+                      })
+                      .build());
+            c.add(view("Spacer").build());
+          })
+          .build();
+
+  return view("Overlay")
+      .children([&](auto &c) {
+        c.add(std::move(scrim));
+        c.add(std::move(center));
+      })
+      .build();
+}
+
+#if !defined(Alert)
+inline ViewNode Alert(std::initializer_list<ViewNode> alert_children,
+                      std::uint64_t scrim_pointer_up = 0,
+                      float width = 360.0f,
+                      std::int64_t scrim_bg = 0x99000000,
+                      std::int64_t alert_bg = 0xFF202020) {
+  return AlertDialog(alert_children, scrim_pointer_up, width, scrim_bg, alert_bg);
+}
+#endif
+
 inline bool measure_node_box(const ViewNode &node, ConstraintsF constraints,
                              SizeF &out) {
   if (node.type != "Box") {

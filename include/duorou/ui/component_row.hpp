@@ -20,6 +20,10 @@ inline ViewNode HStack(std::initializer_list<ViewNode> children) {
   return Row(children);
 }
 
+inline ViewNode LazyHStack(std::initializer_list<ViewNode> children) {
+  return Row(children);
+}
+
 inline bool measure_node_row(const ViewNode &node, ConstraintsF constraints,
                              SizeF &out) {
   if (node.type != "Row") {

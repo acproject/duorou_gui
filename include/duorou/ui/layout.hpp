@@ -9,6 +9,8 @@
 #include <duorou/ui/component_checkbox.hpp>
 #include <duorou/ui/component_column.hpp>
 #include <duorou/ui/component_divider.hpp>
+#include <duorou/ui/component_geometryreader.hpp>
+#include <duorou/ui/component_grid.hpp>
 #include <duorou/ui/component_image.hpp>
 #include <duorou/ui/component_row.hpp>
 #include <duorou/ui/component_scrollview.hpp>
@@ -74,6 +76,12 @@ inline SizeF measure_node(const ViewNode &node, ConstraintsF constraints) {
   if (measure_node_scrollview(node, constraints, out)) {
     return out;
   }
+  if (measure_node_geometryreader(node, constraints, out)) {
+    return out;
+  }
+  if (measure_node_grid(node, constraints, out)) {
+    return out;
+  }
 
   if (!node.children.empty()) {
     const auto padding = prop_as_float(node.props, "padding", 0.0f);
@@ -120,6 +128,12 @@ inline LayoutNode layout_node(const ViewNode &node, RectF frame) {
     return out;
   }
   if (layout_children_scrollview(node, frame, out)) {
+    return out;
+  }
+  if (layout_children_geometryreader(node, frame, out)) {
+    return out;
+  }
+  if (layout_children_grid(node, frame, out)) {
     return out;
   }
 

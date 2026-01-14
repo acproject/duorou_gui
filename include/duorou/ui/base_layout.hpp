@@ -35,6 +35,9 @@ struct LayoutNode {
   std::string type;
   RectF frame;
   std::vector<LayoutNode> children;
+  float scroll_y{};
+  float scroll_content_h{};
+  float scroll_max_y{};
 };
 
 inline float clampf(float v, float lo, float hi) {
@@ -112,4 +115,3 @@ inline SizeF apply_explicit_size(const ViewNode &node, ConstraintsF constraints,
 }
 
 } // namespace duorou::ui
-

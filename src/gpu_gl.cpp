@@ -1322,6 +1322,35 @@ static void mouse_button_cb(GLFWwindow *win, int button, int action, int mods) {
   }
 }
 
+static void scroll_cb(GLFWwindow *win, double xoffset, double yoffset) {
+  (void)xoffset;
+  auto *ctx = static_cast<InputCtx *>(glfwGetWindowUserPointer(win));
+  if (!ctx || !ctx->app) {
+    return;
+  }
+
+  double xpos = 0.0;
+  double ypos = 0.0;
+  glfwGetCursorPos(win, &xpos, &ypos);
+
+  int ww = 0;
+  int wh = 0;
+  glfwGetWindowSize(win, &ww, &wh);
+  int fbw = 0;
+  int fbh = 0;
+  glfwGetFramebufferSize(win, &fbw, &fbh);
+  const double sx =
+      ww > 0 ? static_cast<double>(fbw) / static_cast<double>(ww) : 1.0;
+  const double sy =
+      wh > 0 ? static_cast<double>(fbh) / static_cast<double>(wh) : 1.0;
+
+  const float x = static_cast<float>(xpos * sx);
+  const float y = static_cast<float>(ypos * sy);
+
+  const float wheel_px = 40.0f;
+  ctx->app->dispatch_scroll(x, y, static_cast<float>(-yoffset) * wheel_px);
+}
+
 static void key_cb(GLFWwindow *win, int key, int scancode, int action,
                    int mods) {
   auto *ctx = static_cast<InputCtx *>(glfwGetWindowUserPointer(win));
@@ -1349,6 +1378,7 @@ static void char_cb(GLFWwindow *win, unsigned int codepoint) {
 
 int main(int argc, char **argv) {
   bool use_terminal = false;
+  bool use_nav = false;
   for (int i = 1; i < argc; ++i) {
     const char *arg = argv ? argv[i] : nullptr;
     if (!arg) {
@@ -1356,6 +1386,11 @@ int main(int argc, char **argv) {
     }
     if (std::strcmp(arg, "--terminal") == 0 || std::strcmp(arg, "terminal") == 0) {
       use_terminal = true;
+    }
+    if (std::strcmp(arg, "--nav") == 0 || std::strcmp(arg, "nav") == 0 ||
+        std::strcmp(arg, "--nav-container") == 0 ||
+        std::strcmp(arg, "nav-container") == 0) {
+      use_nav = true;
     }
   }
 
@@ -1366,8 +1401,12 @@ int main(int argc, char **argv) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
-  const char *title =
-      use_terminal ? "duorou_terminal_demo (OpenGL)" : "duorou_gpu_demo (OpenGL)";
+  const char *title = "duorou_gpu_demo (OpenGL)";
+  if (use_terminal) {
+    title = "duorou_terminal_demo (OpenGL)";
+  } else if (use_nav) {
+    title = "duorou_nav_demo (OpenGL)";
+  }
   GLFWwindow *win =
       glfwCreateWindow(800, 600, title, nullptr, nullptr);
   if (!win) {
@@ -1415,12 +1454,18 @@ int main(int argc, char **argv) {
   auto bind_secure_value = state<std::string>(std::string{"secret"});
   auto bind_editor_value = state<std::string>(
       std::string{"Drag to select (Binding TextEditor)\nSecond line\nThird line"});
+  auto sheet_presented = state<bool>(false);
+  auto alert_presented = state<bool>(false);
+  auto fullscreen_presented = state<bool>(false);
 
   GLTextCache text_cache;
 
   ViewInstance app{[&]() {
     if (use_terminal) {
       return duorou::ui::examples::terminal_view();
+    }
+    if (use_nav) {
+      return duorou::ui::examples::navigation_container_view();
     }
 
     auto slider_set_from_pointer = [slider]() mutable {
@@ -1433,11 +1478,15 @@ int main(int argc, char **argv) {
       slider.set(v);
     };
 
-    return view("Column")
-        .prop("padding", 24)
-        .prop("spacing", 12)
-        .prop("cross_align", "start")
+    auto base = view("ScrollView")
+        .key("root_scroll")
+        .prop("clip", true)
         .children({
+          view("Column")
+              .prop("padding", 24)
+              .prop("spacing", 12)
+              .prop("cross_align", "start")
+              .children({
             view("Box")
                 .prop("padding", 12)
                 .prop("bg", 0xFF202020)
@@ -2034,6 +2083,160 @@ int main(int argc, char **argv) {
                         .build(),
                 })
                 .build(),
+
+            view("Divider").prop("thickness", 1.0).prop("color", 0xFF3A3A3A).build(),
+
+            view("Box")
+                .prop("padding", 12)
+                .prop("bg", 0xFF202020)
+                .prop("border", 0xFF3A3A3A)
+                .prop("border_width", 1.0)
+                .children({
+                    view("Column")
+                        .prop("spacing", 8)
+                        .prop("cross_align", "start")
+                        .children({
+                            view("Text")
+                                .prop("value", "Modal / Overlay demo")
+                                .prop("font_size", 16.0)
+                                .build(),
+                            view("Text")
+                                .prop("value",
+                                      "Open a Sheet. Tap scrim to dismiss.")
+                                .prop("font_size", 12.0)
+                                .prop("color", 0xFFB0B0B0)
+                                .build(),
+                            view("Button")
+                                .prop("title", "Open Sheet")
+                                .event("pointer_up", on_pointer_up([sheet_presented]() mutable {
+                                         sheet_presented.set(true);
+                                       }))
+                                .build(),
+                            view("Button")
+                                .prop("title", "Open Alert")
+                                .event("pointer_up", on_pointer_up([alert_presented, sheet_presented, fullscreen_presented]() mutable {
+                                         sheet_presented.set(false);
+                                         fullscreen_presented.set(false);
+                                         alert_presented.set(true);
+                                       }))
+                                .build(),
+                            view("Button")
+                                .prop("title", "Open FullScreenCover")
+                                .event("pointer_up", on_pointer_up([fullscreen_presented, sheet_presented, alert_presented]() mutable {
+                                         sheet_presented.set(false);
+                                         alert_presented.set(false);
+                                         fullscreen_presented.set(true);
+                                       }))
+                                .build(),
+                        })
+                        .build(),
+                })
+                .build(),
+              })
+              .build(),
+        })
+        .build();
+
+    if (!sheet_presented.get() && !alert_presented.get() &&
+        !fullscreen_presented.get()) {
+      return base;
+    }
+
+    return view("Overlay")
+        .children([&](auto &c) {
+          c.add(std::move(base));
+          if (fullscreen_presented.get()) {
+            c.add(duorou::ui::FullScreenCover(
+                {
+                    view("Column")
+                        .prop("padding", 24.0)
+                        .prop("spacing", 12.0)
+                        .prop("cross_align", "start")
+                        .children({
+                            view("Text")
+                                .prop("value", "FullScreenCover")
+                                .prop("font_size", 18.0)
+                                .build(),
+                            view("Text")
+                                .prop("value",
+                                      "Tap background or button to close.")
+                                .prop("font_size", 12.0)
+                                .prop("color", 0xFFB0B0B0)
+                                .build(),
+                            view("Button")
+                                .prop("title", "Close")
+                                .event("pointer_up", on_pointer_up([fullscreen_presented]() mutable {
+                                         fullscreen_presented.set(false);
+                                       }))
+                                .build(),
+                        })
+                        .build(),
+                },
+                on_pointer_up([fullscreen_presented]() mutable {
+                  fullscreen_presented.set(false);
+                }),
+                0xFF141414));
+          }
+
+          if (sheet_presented.get()) {
+            c.add(duorou::ui::Sheet(
+                {
+                    view("Text")
+                        .prop("value", "Sheet (modal)")
+                        .prop("font_size", 16.0)
+                        .build(),
+                    view("Text")
+                        .prop("value",
+                              "Background input is blocked by scrim.")
+                        .prop("font_size", 12.0)
+                        .prop("color", 0xFFB0B0B0)
+                        .build(),
+                    view("Button")
+                        .prop("title", "Close")
+                        .event("pointer_up", on_pointer_up([sheet_presented]() mutable {
+                                 sheet_presented.set(false);
+                               }))
+                        .build(),
+                },
+                on_pointer_up([sheet_presented]() mutable { sheet_presented.set(false); }),
+                240.0f));
+          }
+
+          if (alert_presented.get()) {
+            c.add(duorou::ui::AlertDialog(
+                {
+                    view("Text")
+                        .prop("value", "Alert")
+                        .prop("font_size", 16.0)
+                        .build(),
+                    view("Text")
+                        .prop("value",
+                              "This is a simple modal alert composed from Overlay.")
+                        .prop("font_size", 12.0)
+                        .prop("color", 0xFFB0B0B0)
+                        .build(),
+                    view("Row")
+                        .prop("spacing", 10.0)
+                        .prop("cross_align", "center")
+                        .children({
+                            view("Spacer").build(),
+                            view("Button")
+                                .prop("title", "Cancel")
+                                .event("pointer_up", on_pointer_up([alert_presented]() mutable {
+                                         alert_presented.set(false);
+                                       }))
+                                .build(),
+                            view("Button")
+                                .prop("title", "OK")
+                                .event("pointer_up", on_pointer_up([alert_presented]() mutable {
+                                         alert_presented.set(false);
+                                       }))
+                                .build(),
+                        })
+                        .build(),
+                },
+                on_pointer_up([alert_presented]() mutable { alert_presented.set(false); })));
+          }
         })
         .build();
   }};
@@ -2043,6 +2246,7 @@ int main(int argc, char **argv) {
   glfwSetWindowUserPointer(win, &input);
   glfwSetCursorPosCallback(win, cursor_pos_cb);
   glfwSetMouseButtonCallback(win, mouse_button_cb);
+  glfwSetScrollCallback(win, scroll_cb);
   glfwSetKeyCallback(win, key_cb);
   glfwSetCharCallback(win, char_cb);
 
