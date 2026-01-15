@@ -21,6 +21,8 @@ endif()
 add_executable(duorou_demo src/main.cpp)
 target_link_libraries(duorou_demo PRIVATE duorou_ui)
 
+add_subdirectory(editor)
+
 if(APPLE)
   enable_language(OBJCXX)
   add_executable(duorou_gpu_demo src/gpu_metal.mm)

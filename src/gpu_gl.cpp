@@ -23,6 +23,10 @@ using GLfloat = float;
 
 #include "terminal_view.hpp"
 
+#if defined(DUOROU_USE_EDITOR_VIEW)
+#include <editor/editor_view.hpp>
+#endif
+
 #if !defined(GL_CLAMP_TO_EDGE)
 #define GL_CLAMP_TO_EDGE 0x812F
 #endif
@@ -1395,6 +1399,10 @@ static void char_cb(GLFWwindow *win, unsigned int codepoint) {
 int main(int argc, char **argv) {
   bool use_terminal = false;
   bool use_nav = false;
+  bool use_editor = false;
+#if defined(DUOROU_EDITOR_DEFAULT)
+  use_editor = true;
+#endif
   for (int i = 1; i < argc; ++i) {
     const char *arg = argv ? argv[i] : nullptr;
     if (!arg) {
@@ -1408,6 +1416,9 @@ int main(int argc, char **argv) {
         std::strcmp(arg, "nav-container") == 0) {
       use_nav = true;
     }
+    if (std::strcmp(arg, "--editor") == 0 || std::strcmp(arg, "editor") == 0) {
+      use_editor = true;
+    }
   }
 
   if (!glfwInit()) {
@@ -1418,7 +1429,9 @@ int main(int argc, char **argv) {
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
 
   const char *title = "duorou_gpu_demo (OpenGL)";
-  if (use_terminal) {
+  if (use_editor) {
+    title = "duorou_editor (OpenGL)";
+  } else if (use_terminal) {
     title = "duorou_terminal_demo (OpenGL)";
   } else if (use_nav) {
     title = "duorou_nav_demo (OpenGL)";
@@ -1490,6 +1503,11 @@ int main(int argc, char **argv) {
   GLTextCache text_cache;
 
   ViewInstance app{[&]() {
+#if defined(DUOROU_USE_EDITOR_VIEW)
+    if (use_editor) {
+      return duorou::ui::editor::editor_view(demo_tex_handle);
+    }
+#endif
     if (use_terminal) {
       return duorou::ui::examples::terminal_view();
     }
