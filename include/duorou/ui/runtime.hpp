@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -35,6 +36,9 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#if defined(DrawText)
+#undef DrawText
+#endif
 #endif
 
 namespace duorou::ui {
@@ -198,6 +202,263 @@ inline thread_local ViewInstance *active_build_instance = nullptr;
 inline thread_local std::optional<AnimationSpec> active_animation_spec = std::nullopt;
 
 void request_animation(const AnimationSpec &spec);
+
+struct StyleRule {
+  std::string type;
+  std::string cls;
+  std::string key;
+  std::unordered_map<std::string, PropValue> decls;
+  std::int32_t specificity{};
+  std::int32_t order{};
+};
+
+inline std::string_view trim_ws(std::string_view s) {
+  std::size_t i = 0;
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) {
+    ++i;
+  }
+  std::size_t j = s.size();
+  while (j > i && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) {
+    --j;
+  }
+  return s.substr(i, j - i);
+}
+
+inline std::vector<std::string> split_ws(std::string_view s) {
+  std::vector<std::string> out;
+  std::size_t i = 0;
+  while (i < s.size()) {
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) {
+      ++i;
+    }
+    const std::size_t start = i;
+    while (i < s.size() && !(s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) {
+      ++i;
+    }
+    if (start < i) {
+      out.emplace_back(s.substr(start, i - start));
+    }
+  }
+  return out;
+}
+
+inline std::string unescape_toml_string(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    const char c = s[i];
+    if (c != '\\' || i + 1 >= s.size()) {
+      out.push_back(c);
+      continue;
+    }
+    const char n = s[++i];
+    if (n == 'n') {
+      out.push_back('\n');
+    } else if (n == 't') {
+      out.push_back('\t');
+    } else if (n == 'r') {
+      out.push_back('\r');
+    } else if (n == '\\') {
+      out.push_back('\\');
+    } else if (n == '"') {
+      out.push_back('"');
+    } else {
+      out.push_back(n);
+    }
+  }
+  return out;
+}
+
+inline std::optional<std::string> parse_toml_table_name(std::string_view line) {
+  line = trim_ws(line);
+  if (line.size() < 3 || line.front() != '[' || line.back() != ']') {
+    return std::nullopt;
+  }
+  auto inner = trim_ws(line.substr(1, line.size() - 2));
+  if (inner.size() >= 2 &&
+      ((inner.front() == '"' && inner.back() == '"') ||
+       (inner.front() == '\'' && inner.back() == '\''))) {
+    inner = inner.substr(1, inner.size() - 2);
+    return unescape_toml_string(inner);
+  }
+  return std::string{inner};
+}
+
+inline std::pair<std::string, std::string> parse_toml_kv(std::string_view line) {
+  const auto pos = line.find('=');
+  if (pos == std::string_view::npos) {
+    return {};
+  }
+  auto k = trim_ws(line.substr(0, pos));
+  auto v = trim_ws(line.substr(pos + 1));
+  if (k.size() >= 2 &&
+      ((k.front() == '"' && k.back() == '"') || (k.front() == '\'' && k.back() == '\''))) {
+    k = k.substr(1, k.size() - 2);
+  }
+  return {std::string{k}, std::string{v}};
+}
+
+inline PropValue parse_toml_value(std::string_view v) {
+  v = trim_ws(v);
+  if (v.size() >= 2 &&
+      ((v.front() == '"' && v.back() == '"') || (v.front() == '\'' && v.back() == '\''))) {
+    return PropValue{unescape_toml_string(v.substr(1, v.size() - 2))};
+  }
+  if (v == "true") {
+    return PropValue{true};
+  }
+  if (v == "false") {
+    return PropValue{false};
+  }
+  if (v.size() > 2 && v[0] == '0' && (v[1] == 'x' || v[1] == 'X')) {
+    try {
+      const auto u = static_cast<std::uint64_t>(std::stoull(std::string{v}, nullptr, 16));
+      return PropValue{static_cast<std::int64_t>(u)};
+    } catch (...) {
+      return PropValue{std::string{v}};
+    }
+  }
+  if (v.find('.') != std::string_view::npos) {
+    try {
+      return PropValue{std::stod(std::string{v})};
+    } catch (...) {
+      return PropValue{std::string{v}};
+    }
+  }
+  try {
+    return PropValue{static_cast<std::int64_t>(std::stoll(std::string{v}))};
+  } catch (...) {
+    return PropValue{std::string{v}};
+  }
+}
+
+inline StyleRule parse_style_selector(std::string_view selector) {
+  selector = trim_ws(selector);
+  StyleRule rule{};
+  rule.specificity = 0;
+  if (selector.empty()) {
+    return rule;
+  }
+
+  if (selector.front() == '#') {
+    rule.key = std::string{selector.substr(1)};
+    rule.specificity = 100;
+    return rule;
+  }
+  if (selector.front() == '.') {
+    rule.cls = std::string{selector.substr(1)};
+    rule.specificity = 10;
+    return rule;
+  }
+
+  const auto dot = selector.find('.');
+  if (dot == std::string_view::npos) {
+    rule.type = std::string{selector};
+    rule.specificity = 1;
+    return rule;
+  }
+
+  rule.type = std::string{selector.substr(0, dot)};
+  rule.cls = std::string{selector.substr(dot + 1)};
+  rule.specificity = 11;
+  return rule;
+}
+
+inline std::vector<StyleRule> parse_stylesheet_toml(std::string_view toml) {
+  std::vector<StyleRule> rules;
+  std::optional<std::size_t> active;
+  std::int32_t order = 0;
+
+  std::size_t pos = 0;
+  while (pos <= toml.size()) {
+    const auto next = toml.find('\n', pos);
+    auto line = (next == std::string_view::npos) ? toml.substr(pos) : toml.substr(pos, next - pos);
+    pos = (next == std::string_view::npos) ? toml.size() + 1 : next + 1;
+
+    const auto hash = line.find('#');
+    if (hash != std::string_view::npos) {
+      line = line.substr(0, hash);
+    }
+    line = trim_ws(line);
+    if (line.empty()) {
+      continue;
+    }
+
+    if (auto t = parse_toml_table_name(line)) {
+      StyleRule r = parse_style_selector(*t);
+      r.order = order++;
+      rules.push_back(std::move(r));
+      active = rules.size() - 1;
+      continue;
+    }
+
+    if (!active) {
+      continue;
+    }
+
+    const auto kv = parse_toml_kv(line);
+    if (kv.first.empty()) {
+      continue;
+    }
+    rules[*active].decls.insert_or_assign(kv.first, parse_toml_value(kv.second));
+  }
+
+  return rules;
+}
+
+inline void apply_styles_to_tree(ViewNode &root, const std::vector<StyleRule> &rules) {
+  auto apply_node = [&](auto &&self, ViewNode &node) -> void {
+    struct StyledValue {
+      PropValue value;
+      std::int32_t specificity{};
+      std::int32_t order{};
+    };
+    std::unordered_map<std::string, StyledValue> styled;
+
+    const auto classes = split_ws(prop_as_string(node.props, "class", ""));
+    const auto has_class = [&](const std::string &c) -> bool {
+      for (const auto &it : classes) {
+        if (it == c) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    for (const auto &r : rules) {
+      if (!r.key.empty() && node.key != r.key) {
+        continue;
+      }
+      if (!r.type.empty() && node.type != r.type) {
+        continue;
+      }
+      if (!r.cls.empty() && !has_class(r.cls)) {
+        continue;
+      }
+      for (const auto &kv : r.decls) {
+        const auto it = styled.find(kv.first);
+        if (it == styled.end() ||
+            r.specificity > it->second.specificity ||
+            (r.specificity == it->second.specificity && r.order >= it->second.order)) {
+          styled.insert_or_assign(kv.first,
+                                  StyledValue{kv.second, r.specificity, r.order});
+        }
+      }
+    }
+
+    for (const auto &kv : styled) {
+      if (!node.props.contains(kv.first)) {
+        node.props.insert_or_assign(kv.first, kv.second.value);
+      }
+    }
+
+    for (auto &ch : node.children) {
+      self(self, ch);
+    }
+  };
+
+  apply_node(apply_node, root);
+}
 
 } // namespace detail
 
@@ -1589,6 +1850,17 @@ private:
     detail::active_event_collector = &event_collector;
     detail::active_build_instance = this;
     auto new_tree = fn_();
+    if (const auto *pv = env_value("style.toml")) {
+      if (const auto *s = std::get_if<std::string>(pv)) {
+        if (*s != style_toml_cache_) {
+          style_toml_cache_ = *s;
+          style_rules_cache_ = detail::parse_stylesheet_toml(style_toml_cache_);
+        }
+        if (!style_rules_cache_.empty()) {
+          detail::apply_styles_to_tree(new_tree, style_rules_cache_);
+        }
+      }
+    }
 
     auto apply_text_bindings = [&](auto &&self, ViewNode &node) -> void {
       for (auto &ch : node.children) {
@@ -2297,6 +2569,8 @@ private:
   std::unordered_map<std::string, std::shared_ptr<StateBase>> local_states_{};
   std::unordered_map<std::string, PropValue> env_values_{};
   std::unordered_map<std::string, std::shared_ptr<void>> env_objects_{};
+  std::string style_toml_cache_{};
+  std::vector<detail::StyleRule> style_rules_cache_{};
   std::optional<AnimationSpec> pending_animation_{};
   std::vector<PropAnim> anims_{};
   std::unordered_map<std::string, TimelineReg> timelines_{};
@@ -2422,7 +2696,9 @@ template <typename T> inline T Environment(const std::string &key, T fallback) {
     return fallback;
   }
 
-  if constexpr (std::is_same_v<T, std::string>) {
+  if constexpr (std::is_same_v<T, PropValue>) {
+    return *pv;
+  } else if constexpr (std::is_same_v<T, std::string>) {
     if (const auto *s = std::get_if<std::string>(pv)) {
       return *s;
     }
@@ -2463,6 +2739,70 @@ template <typename T> inline T Environment(const std::string &key, T fallback) {
   } else {
     return fallback;
   }
+}
+
+template <typename Key>
+inline const std::string &StyleKeyName() {
+  static const std::string s = std::string{Key::key};
+  return s;
+}
+
+template <typename Key>
+inline typename Key::Value StyleValue(typename Key::Value fallback = Key::default_value()) {
+  return Environment(StyleKeyName<Key>(), std::move(fallback));
+}
+
+template <typename Key>
+inline void provide_style(typename Key::Value value) {
+  provide_environment(StyleKeyName<Key>(), std::move(value));
+}
+
+inline void provide_style_toml(std::string toml) {
+  provide_environment("style.toml", std::move(toml));
+}
+
+inline void provide_style_toml(const char *toml) {
+  provide_environment("style.toml", std::string{toml ? toml : ""});
+}
+
+inline std::optional<std::string> load_text_file(const std::string &path) {
+  std::ifstream f(path, std::ios::in | std::ios::binary);
+  if (!f) {
+    return std::nullopt;
+  }
+  f.seekg(0, std::ios::end);
+  const auto size = f.tellg();
+  if (size <= 0) {
+    return std::string{};
+  }
+  std::string out;
+  out.resize(static_cast<std::size_t>(size));
+  f.seekg(0, std::ios::beg);
+  if (!f.read(out.data(), static_cast<std::streamsize>(out.size()))) {
+    return std::nullopt;
+  }
+  return out;
+}
+
+inline bool provide_style_toml_file(const std::string &path) {
+  auto s = load_text_file(path);
+  if (!s) {
+    return false;
+  }
+  provide_style_toml(std::move(*s));
+  return true;
+}
+
+inline ViewNode style_class(ViewNode node, std::string cls) {
+  auto cur = prop_as_string(node.props, "class", "");
+  if (cur.empty()) {
+    node.props.insert_or_assign("class", PropValue{std::move(cls)});
+    return node;
+  }
+  cur.push_back(' ');
+  cur += cls;
+  node.props.insert_or_assign("class", PropValue{std::move(cur)});
+  return node;
 }
 
 template <typename T>
@@ -3162,6 +3502,95 @@ inline ViewNode Link(std::string title, std::string url) {
             open_url(url);
           }));
   return std::move(b).build();
+}
+
+inline ViewNode WebView(std::string url, double default_width = 520.0,
+                        double default_height = 320.0) {
+#if !defined(DUOROU_ENABLE_WEBVIEW) || !DUOROU_ENABLE_WEBVIEW
+  const std::string key = std::string{"webview_disabled:"} + url;
+  auto node = Canvas(
+      key,
+      [url](RectF frame, std::vector<RenderOp> &out) {
+        out.push_back(DrawRect{frame, ColorU8{28, 28, 30, 255}});
+        const RectF title_r{frame.x + 10.0f, frame.y + 10.0f,
+                            std::max(0.0f, frame.w - 20.0f), 22.0f};
+        out.push_back(
+            DrawText{title_r, std::string{"WebView disabled"},
+                     ColorU8{220, 220, 220, 255}, 14.0f, 0.0f, 0.0f});
+        const RectF url_r{frame.x + 10.0f, frame.y + 34.0f,
+                          std::max(0.0f, frame.w - 20.0f),
+                          std::max(0.0f, frame.h - 44.0f)};
+        out.push_back(DrawText{url_r, url, ColorU8{140, 180, 255, 255}, 12.0f,
+                               0.0f, 0.0f});
+      },
+      default_width, default_height);
+  return node;
+#else
+  const std::string key = std::string{"webview:"} + url;
+  auto node = Canvas(
+      key,
+      [url](RectF frame, std::vector<RenderOp> &out) {
+        out.push_back(DrawRect{frame, ColorU8{28, 28, 30, 255}});
+        const RectF title_r{frame.x + 10.0f, frame.y + 10.0f,
+                            std::max(0.0f, frame.w - 20.0f), 22.0f};
+        out.push_back(
+            DrawText{title_r, std::string{"WebView (placeholder)"},
+                     ColorU8{220, 220, 220, 255}, 14.0f, 0.0f, 0.0f});
+        const RectF url_r{frame.x + 10.0f, frame.y + 34.0f,
+                          std::max(0.0f, frame.w - 20.0f),
+                          std::max(0.0f, frame.h - 44.0f)};
+        out.push_back(DrawText{url_r, url, ColorU8{140, 180, 255, 255}, 12.0f,
+                               0.0f, 0.0f});
+      },
+      default_width, default_height);
+  node = onTapGesture(std::move(node), [url = std::move(url)]() mutable {
+    open_url(url);
+  });
+  return node;
+#endif
+}
+
+inline ViewNode VideoPlayer(std::string source, double default_width = 520.0,
+                            double default_height = 320.0) {
+#if !defined(DUOROU_ENABLE_FFMPEG) || !DUOROU_ENABLE_FFMPEG
+  const std::string key = std::string{"videoplayer_disabled:"} + source;
+  auto node = Canvas(
+      key,
+      [source](RectF frame, std::vector<RenderOp> &out) {
+        out.push_back(DrawRect{frame, ColorU8{20, 20, 22, 255}});
+        const RectF title_r{frame.x + 10.0f, frame.y + 10.0f,
+                            std::max(0.0f, frame.w - 20.0f), 22.0f};
+        out.push_back(
+            DrawText{title_r, std::string{"VideoPlayer disabled"},
+                     ColorU8{220, 220, 220, 255}, 14.0f, 0.0f, 0.0f});
+        const RectF url_r{frame.x + 10.0f, frame.y + 34.0f,
+                          std::max(0.0f, frame.w - 20.0f),
+                          std::max(0.0f, frame.h - 44.0f)};
+        out.push_back(DrawText{url_r, source, ColorU8{200, 200, 200, 255}, 12.0f,
+                               0.0f, 0.0f});
+      },
+      default_width, default_height);
+  return node;
+#else
+  const std::string key = std::string{"videoplayer:"} + source;
+  auto node = Canvas(
+      key,
+      [source](RectF frame, std::vector<RenderOp> &out) {
+        out.push_back(DrawRect{frame, ColorU8{20, 20, 22, 255}});
+        const RectF title_r{frame.x + 10.0f, frame.y + 10.0f,
+                            std::max(0.0f, frame.w - 20.0f), 22.0f};
+        out.push_back(
+            DrawText{title_r, std::string{"VideoPlayer (placeholder)"},
+                     ColorU8{220, 220, 220, 255}, 14.0f, 0.0f, 0.0f});
+        const RectF url_r{frame.x + 10.0f, frame.y + 34.0f,
+                          std::max(0.0f, frame.w - 20.0f),
+                          std::max(0.0f, frame.h - 44.0f)};
+        out.push_back(DrawText{url_r, source, ColorU8{200, 200, 200, 255}, 12.0f,
+                               0.0f, 0.0f});
+      },
+      default_width, default_height);
+  return node;
+#endif
 }
 
 inline ViewNode ShareLink(std::string title, std::string url,

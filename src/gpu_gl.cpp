@@ -6,6 +6,21 @@ int main() { return 0; }
 
 #include <GLFW/glfw3.h>
 
+#if defined(_WIN32)
+#include <GL/gl.h>
+#elif defined(__linux__)
+#include <GL/gl.h>
+#endif
+
+#if !defined(GL_VERSION_1_0) && !defined(GL_VERSION_1_1)
+using GLboolean = unsigned char;
+using GLenum = unsigned int;
+using GLuint = unsigned int;
+using GLint = int;
+using GLsizei = int;
+using GLfloat = float;
+#endif
+
 #include "terminal_view.hpp"
 
 #if !defined(GL_CLAMP_TO_EDGE)

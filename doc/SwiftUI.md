@@ -184,8 +184,8 @@
 
 | SwiftUI | duorou_gui | 状态 | 备注 |
 |---|---|---|---|
-| Map | （未内置） | ⏳ | 需接入地图 SDK 或 WebView/纹理绘制方案 |
-| VideoPlayer | （未内置） | ⏳ | 需解码并持续更新 TextureHandle（可接入平台播放器/FFmpeg） |
+| Map | WebView(url)（占位） | ⏳ | DUOROU_ENABLE_WEBVIEW=0 时显示 disabled 占位；仍需接入真实 WebView |
+| VideoPlayer | VideoPlayer(source)（占位） | ⏳ | DUOROU_ENABLE_FFMPEG=0 时显示 disabled 占位；仍需接入解码与纹理更新 |
 | PhotosPicker | PhotosPicker(StateHandle<string>, title) | ✅ | Windows: 原生文件对话框筛选图片；其他平台暂不支持 |
 | ShareLink | ShareLink(title, url, openAfterCopy) | ✅ | Windows: 复制到剪贴板；可选同时 open_url；其他平台暂不支持 |
 | Link | Link(title, url) | ✅ | 点击调用 open_url 打开外部链接 |

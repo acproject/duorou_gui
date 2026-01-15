@@ -6,8 +6,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+option(DUOROU_ENABLE_WEBVIEW "Enable WebView integration (placeholder by default)" OFF)
+option(DUOROU_ENABLE_FFMPEG "Enable FFmpeg integration (placeholder by default)" OFF)
+
 add_library(duorou_ui INTERFACE)
 target_include_directories(duorou_ui INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(DUOROU_ENABLE_WEBVIEW)
+  target_compile_definitions(duorou_ui INTERFACE DUOROU_ENABLE_WEBVIEW=1)
+endif()
+if(DUOROU_ENABLE_FFMPEG)
+  target_compile_definitions(duorou_ui INTERFACE DUOROU_ENABLE_FFMPEG=1)
+endif()
 
 add_executable(duorou_demo src/main.cpp)
 target_link_libraries(duorou_demo PRIVATE duorou_ui)
