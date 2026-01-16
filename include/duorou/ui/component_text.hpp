@@ -38,9 +38,9 @@ inline bool emit_render_ops_text(const ViewNode &v, const LayoutNode &l,
   }
   const auto text = prop_as_string(v.props, "value", "");
   const auto font_px = prop_as_float(v.props, "font_size", 16.0f);
-  out.push_back(DrawText{l.frame, text, ColorU8{255, 255, 255, 255}, font_px});
+  const auto color = prop_as_color(v.props, "color", ColorU8{255, 255, 255, 255});
+  out.push_back(DrawText{l.frame, text, color, font_px});
   return true;
 }
 
 } // namespace duorou::ui
-

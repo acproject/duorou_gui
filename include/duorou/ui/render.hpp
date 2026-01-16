@@ -46,6 +46,36 @@ inline RectF apply_offset(RectF r, float ox, float oy) {
   return r;
 }
 
+inline RectF apply_scale_about(RectF r, float ox, float oy, float s) {
+  r.x = ox + (r.x - ox) * s;
+  r.y = oy + (r.y - oy) * s;
+  r.w *= s;
+  r.h *= s;
+  return r;
+}
+
+inline void apply_scale_about(RenderOp &op, float ox, float oy, float s) {
+  if (s == 1.0f) {
+    return;
+  }
+  std::visit(
+      [&](auto &v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, PushClip>) {
+          v.rect = apply_scale_about(v.rect, ox, oy, s);
+        } else if constexpr (std::is_same_v<T, DrawRect>) {
+          v.rect = apply_scale_about(v.rect, ox, oy, s);
+        } else if constexpr (std::is_same_v<T, DrawText>) {
+          v.rect = apply_scale_about(v.rect, ox, oy, s);
+          v.font_px *= s;
+          v.caret_w *= s;
+        } else if constexpr (std::is_same_v<T, DrawImage>) {
+          v.rect = apply_scale_about(v.rect, ox, oy, s);
+        }
+      },
+      op);
+}
+
 inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
                              float parent_opacity, float parent_ox,
                              float parent_oy, std::vector<RenderOp> &out) {
@@ -54,9 +84,11 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
       parent_opacity * prop_as_float(v.props, "opacity", 1.0f);
   const float ox = parent_ox + prop_as_float(v.props, "render_offset_x", 0.0f);
   const float oy = parent_oy + prop_as_float(v.props, "render_offset_y", 0.0f);
+  const float render_scale = prop_as_float(v.props, "render_scale", 1.0f);
 
   const RectF frame = apply_offset(l.frame, ox, oy);
 
+  const auto start_all = out.size();
   if (clip) {
     out.push_back(PushClip{frame});
   }
@@ -117,6 +149,12 @@ inline void build_render_ops(const ViewNode &v, const LayoutNode &l,
 
   if (clip) {
     out.push_back(PopClip{});
+  }
+
+  if (render_scale != 1.0f) {
+    for (std::size_t i = start_all; i < out.size(); ++i) {
+      apply_scale_about(out[i], frame.x, frame.y, render_scale);
+    }
   }
 }
 

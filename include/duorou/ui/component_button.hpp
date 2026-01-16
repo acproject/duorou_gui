@@ -60,12 +60,23 @@ inline bool emit_render_ops_button(const ViewNode &v, const LayoutNode &l,
   if (v.type != "Button") {
     return false;
   }
-  const auto pressed = prop_as_bool(v.props, "pressed", false);
-  out.push_back(DrawRect{l.frame, pressed ? ColorU8{120, 120, 120, 255}
-                                          : ColorU8{80, 80, 80, 255}});
+  const auto bg = prop_as_color(v.props, "bg", ColorU8{80, 80, 80, 255});
+  out.push_back(DrawRect{l.frame, bg});
+
+  const auto bw = prop_as_float(v.props, "border_width", 0.0f);
+  if (bw > 0.0f && find_prop(v.props, "border")) {
+    const auto bc = prop_as_color(v.props, "border", ColorU8{80, 80, 80, 255});
+    const auto t = bw;
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, l.frame.w, t}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y + l.frame.h - t, l.frame.w, t}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, t, l.frame.h}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x + l.frame.w - t, l.frame.y, t, l.frame.h}, bc});
+  }
+
   const auto title = prop_as_string(v.props, "title", "");
   const auto font_px = prop_as_float(v.props, "font_size", 16.0f);
-  out.push_back(DrawText{l.frame, title, ColorU8{255, 255, 255, 255}, font_px});
+  const auto color = prop_as_color(v.props, "color", ColorU8{255, 255, 255, 255});
+  out.push_back(DrawText{l.frame, title, color, font_px});
   return true;
 }
 

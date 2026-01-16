@@ -134,16 +134,31 @@ inline bool emit_render_ops_textfield(const ViewNode &v, const LayoutNode &l,
   const auto caret = prop_as_i64_opt(v.props, "caret");
   const auto sel_start = prop_as_i64_opt(v.props, "sel_start");
   const auto sel_end = prop_as_i64_opt(v.props, "sel_end");
-  out.push_back(DrawRect{l.frame, focused ? ColorU8{55, 55, 55, 255}
-                                         : ColorU8{45, 45, 45, 255}});
+  const auto bg =
+      prop_as_color(v.props, "bg", focused ? ColorU8{55, 55, 55, 255}
+                                          : ColorU8{45, 45, 45, 255});
+  out.push_back(DrawRect{l.frame, bg});
+
+  const auto bw = prop_as_float(v.props, "border_width", 0.0f);
+  if (bw > 0.0f && find_prop(v.props, "border")) {
+    const auto bc = prop_as_color(v.props, "border", ColorU8{80, 80, 80, 255});
+    const auto t = bw;
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, l.frame.w, t}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y + l.frame.h - t, l.frame.w, t}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, t, l.frame.h}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x + l.frame.w - t, l.frame.y, t, l.frame.h}, bc});
+  }
+
   const RectF tr{l.frame.x + padding, l.frame.y,
                  std::max(0.0f, l.frame.w - padding * 2.0f), l.frame.h};
   if (value.empty()) {
+    const auto placeholder_color =
+        prop_as_color(v.props, "placeholder_color", ColorU8{160, 160, 160, 255});
     out.push_back(
-        DrawText{tr, placeholder, ColorU8{160, 160, 160, 255}, font_px, 0.0f, 0.5f});
+        DrawText{tr, placeholder, placeholder_color, font_px, 0.0f, 0.5f});
   } else {
-    DrawText t{tr, secure ? mask_text(value) : value, ColorU8{235, 235, 235, 255},
-               font_px, 0.0f, 0.5f};
+    const auto color = prop_as_color(v.props, "color", ColorU8{235, 235, 235, 255});
+    DrawText t{tr, secure ? mask_text(value) : value, color, font_px, 0.0f, 0.5f};
     if (focused) {
       if (caret) {
         t.caret_pos = std::max<std::int64_t>(0, *caret);
@@ -158,7 +173,8 @@ inline bool emit_render_ops_textfield(const ViewNode &v, const LayoutNode &l,
     out.push_back(std::move(t));
   }
   if (focused && value.empty()) {
-    DrawText t{tr, std::string{}, ColorU8{235, 235, 235, 255}, font_px, 0.0f, 0.5f};
+    const auto color = prop_as_color(v.props, "color", ColorU8{235, 235, 235, 255});
+    DrawText t{tr, std::string{}, color, font_px, 0.0f, 0.5f};
     if (caret) {
       t.caret_pos = std::max<std::int64_t>(0, *caret);
     } else {
@@ -187,8 +203,20 @@ inline bool emit_render_ops_texteditor(const ViewNode &v, const LayoutNode &l,
   const auto sel_start = prop_as_i64_opt(v.props, "sel_start");
   const auto sel_end = prop_as_i64_opt(v.props, "sel_end");
 
-  out.push_back(DrawRect{l.frame, focused ? ColorU8{55, 55, 55, 255}
-                                         : ColorU8{45, 45, 45, 255}});
+  const auto bg =
+      prop_as_color(v.props, "bg", focused ? ColorU8{55, 55, 55, 255}
+                                          : ColorU8{45, 45, 45, 255});
+  out.push_back(DrawRect{l.frame, bg});
+
+  const auto bw = prop_as_float(v.props, "border_width", 0.0f);
+  if (bw > 0.0f && find_prop(v.props, "border")) {
+    const auto bc = prop_as_color(v.props, "border", ColorU8{80, 80, 80, 255});
+    const auto t = bw;
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, l.frame.w, t}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y + l.frame.h - t, l.frame.w, t}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x, l.frame.y, t, l.frame.h}, bc});
+    out.push_back(DrawRect{RectF{l.frame.x + l.frame.w - t, l.frame.y, t, l.frame.h}, bc});
+  }
   const RectF tr{l.frame.x + padding, l.frame.y + padding,
                  std::max(0.0f, l.frame.w - padding * 2.0f),
                  std::max(0.0f, l.frame.h - padding * 2.0f)};
@@ -269,10 +297,10 @@ inline bool emit_render_ops_texteditor(const ViewNode &v, const LayoutNode &l,
     }
   }
 
+  const auto color = prop_as_color(v.props, "color", ColorU8{235, 235, 235, 255});
   for (std::size_t i = 0; i < n; ++i) {
     const RectF lr{tr.x, tr.y + static_cast<float>(i) * line_h, tr.w, line_h};
-    DrawText t{lr, std::string{lines[i].text}, ColorU8{235, 235, 235, 255}, font_px,
-               0.0f, 0.0f};
+    DrawText t{lr, std::string{lines[i].text}, color, font_px, 0.0f, 0.0f};
     if (caret_char >= 0 && i == caret_line) {
       t.caret_pos = std::max<std::int64_t>(0, caret_in_line);
     } else {

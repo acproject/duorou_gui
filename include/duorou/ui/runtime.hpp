@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -290,6 +291,16 @@ inline std::string_view text_input() {
                                               detail::active_dispatch_context
                                                   ->text}
                                          : std::string_view{};
+}
+
+inline std::vector<std::size_t> target_path() {
+  return detail::active_dispatch_context ? detail::active_dispatch_context->target_path
+                                        : std::vector<std::size_t>{};
+}
+
+inline std::string target_key() {
+  return detail::active_dispatch_context ? detail::active_dispatch_context->target_key
+                                        : std::string{};
 }
 
 std::optional<RectF> target_frame();
@@ -612,6 +623,513 @@ inline std::vector<PatchOp> diff_tree(const ViewNode &old_root,
   return out;
 }
 
+class StyleManager : public ObservableObject {
+public:
+  void clear() {
+    registry_.themes.clear();
+    active_theme_.clear();
+    resolved_dirty_ = true;
+    registry_version_++;
+    resolved_cache_.clear();
+    base_cache_.clear();
+    notify_changed();
+  }
+
+  std::size_t theme_count() const noexcept { return registry_.themes.size(); }
+
+  std::vector<std::string> theme_names() const {
+    std::vector<std::string> out;
+    out.reserve(registry_.themes.size());
+    for (const auto &kv : registry_.themes) {
+      out.push_back(kv.first);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+  }
+
+  const ThemeModel *theme(std::string_view name) const {
+    if (name.empty()) {
+      return nullptr;
+    }
+    const auto it = registry_.themes.find(std::string{name});
+    if (it == registry_.themes.end()) {
+      return nullptr;
+    }
+    return &it->second;
+  }
+
+  std::vector<std::string> base_chain(std::string_view name) const {
+    std::vector<std::string> out;
+    std::unordered_set<std::string> visiting;
+    std::string cur{name};
+    while (!cur.empty()) {
+      if (visiting.contains(cur)) {
+        break;
+      }
+      visiting.insert(cur);
+      out.push_back(cur);
+      const auto *t = theme(cur);
+      if (!t) {
+        break;
+      }
+      cur = t->base;
+    }
+    return out;
+  }
+
+  StyleSheetModel resolved_sheet_for(std::string_view name) const {
+    return resolve_theme_sheet(registry_, name);
+  }
+
+  ParseThemeResult load_theme_toml(std::string_view toml) {
+    auto r = parse_theme_toml(toml);
+    upsert_theme(r.theme);
+    return r;
+  }
+
+  ParseThemeResult load_theme_json(std::string_view json) {
+    auto r = parse_theme_json(json);
+    upsert_theme(r.theme);
+    return r;
+  }
+
+  bool load_theme_toml_file(const std::string &path,
+                            ParseThemeResult *out_result = nullptr) {
+    auto s = load_text_file_internal(path);
+    if (!s) {
+      return false;
+    }
+    auto r = load_theme_toml(*s);
+    if (out_result) {
+      *out_result = std::move(r);
+    }
+    return true;
+  }
+
+  bool load_theme_json_file(const std::string &path,
+                            ParseThemeResult *out_result = nullptr) {
+    auto s = load_text_file_internal(path);
+    if (!s) {
+      return false;
+    }
+    auto r = load_theme_json(*s);
+    if (out_result) {
+      *out_result = std::move(r);
+    }
+    return true;
+  }
+
+  void upsert_theme(ThemeModel t) {
+    if (t.name.empty()) {
+      t.name = "Default";
+    }
+    const auto name = t.name;
+    registry_.themes.insert_or_assign(name, std::move(t));
+    if (active_theme_.empty()) {
+      active_theme_ = name;
+    }
+    resolved_dirty_ = true;
+    registry_version_++;
+    resolved_cache_.clear();
+    base_cache_.clear();
+    notify_changed();
+  }
+
+  void remove_theme(std::string_view name) {
+    if (name.empty()) {
+      return;
+    }
+    const std::string key{name};
+    if (registry_.themes.erase(key) == 0) {
+      return;
+    }
+    if (active_theme_ == key) {
+      active_theme_.clear();
+    }
+    resolved_dirty_ = true;
+    registry_version_++;
+    resolved_cache_.clear();
+    base_cache_.clear();
+    notify_changed();
+  }
+
+  const std::string &active_theme() const noexcept { return active_theme_; }
+
+  void set_active_theme(std::string name) {
+    if (!name.empty() && registry_.themes.contains(name)) {
+      if (active_theme_ == name) {
+        return;
+      }
+      active_theme_ = std::move(name);
+      resolved_dirty_ = true;
+      base_cache_.clear();
+      notify_changed();
+      return;
+    }
+    if (!registry_.themes.empty()) {
+      const auto &first = registry_.themes.begin()->first;
+      if (active_theme_ == first) {
+        return;
+      }
+      active_theme_ = first;
+      resolved_dirty_ = true;
+      base_cache_.clear();
+      notify_changed();
+    }
+  }
+
+  void apply_to_tree(ViewNode &root) {
+    ensure_resolved();
+    Props inherited;
+    std::unordered_map<std::string, std::string> inherited_src;
+    apply_node(root, inherited, inherited_src);
+  }
+
+private:
+  static std::optional<std::string> load_text_file_internal(
+      const std::string &path) {
+    std::ifstream f(path, std::ios::in | std::ios::binary);
+    if (!f) {
+      return std::nullopt;
+    }
+    f.seekg(0, std::ios::end);
+    const auto size = f.tellg();
+    if (size <= 0) {
+      return std::string{};
+    }
+    std::string out;
+    out.resize(static_cast<std::size_t>(size));
+    f.seekg(0, std::ios::beg);
+    if (!f.read(out.data(), static_cast<std::streamsize>(out.size()))) {
+      return std::nullopt;
+    }
+    return out;
+  }
+
+  static bool is_reserved_prop_key(std::string_view k) {
+    return k == "key" || k == "type" || k == "id" || k == "class" ||
+           k == "variant" || k == "style_state" || k == "style_override" ||
+           k == "style_override_scope" || k == "binding" || k == "title" ||
+           k == "value" || k == "texture" || k == "content_fn";
+  }
+
+  static std::string node_variant(const ViewNode &v) {
+    return prop_as_string(v.props, "variant", "");
+  }
+
+  static std::string node_state(const ViewNode &v) {
+    const auto forced = prop_as_string(v.props, "style_state", "");
+    if (!forced.empty()) {
+      return forced;
+    }
+    if (prop_as_bool(v.props, "disabled", false)) {
+      return "disabled";
+    }
+    if (prop_as_bool(v.props, "active", false) ||
+        prop_as_bool(v.props, "pressed", false)) {
+      return "active";
+    }
+    if (prop_as_bool(v.props, "hover", false)) {
+      return "hover";
+    }
+    if (prop_as_bool(v.props, "focused", false)) {
+      return "focused";
+    }
+    return {};
+  }
+
+  void ensure_resolved() {
+    if (!resolved_dirty_) {
+      return;
+    }
+    if (active_theme_.empty() && !registry_.themes.empty()) {
+      active_theme_ = registry_.themes.begin()->first;
+    }
+    if (!active_theme_.empty()) {
+      if (const auto it = resolved_cache_.find(active_theme_);
+          it != resolved_cache_.end() && it->second.version == registry_version_) {
+        resolved_sheet_ = it->second.sheet;
+        known_style_keys_ = it->second.known_keys;
+        resolved_dirty_ = false;
+        base_cache_.clear();
+        return;
+      }
+    }
+    resolved_sheet_ = resolve_theme_sheet(registry_, active_theme_);
+    known_style_keys_.clear();
+    for (const auto &kv : resolved_sheet_.global) {
+      known_style_keys_.insert(kv.first);
+    }
+    for (const auto &ckv : resolved_sheet_.components) {
+      for (const auto &kv : ckv.second.props) {
+        known_style_keys_.insert(kv.first);
+      }
+      for (const auto &skv : ckv.second.states) {
+        for (const auto &kv : skv.second) {
+          known_style_keys_.insert(kv.first);
+        }
+      }
+      for (const auto &vkv : ckv.second.variants) {
+        for (const auto &kv : vkv.second.props) {
+          known_style_keys_.insert(kv.first);
+        }
+        for (const auto &sv : vkv.second.states) {
+          for (const auto &kv : sv.second) {
+            known_style_keys_.insert(kv.first);
+          }
+        }
+      }
+    }
+    resolved_dirty_ = false;
+    base_cache_.clear();
+    if (!active_theme_.empty()) {
+      ResolvedCacheEntry e;
+      e.version = registry_version_;
+      e.sheet = resolved_sheet_;
+      e.known_keys = known_style_keys_;
+      resolved_cache_.insert_or_assign(active_theme_, std::move(e));
+    }
+  }
+
+  void collect_subtree_overrides(
+      const ViewNode &v, Props &inherited,
+      std::unordered_map<std::string, std::string> &inherited_src) {
+    const auto enabled = prop_as_bool(v.props, "style_override", true);
+    if (!enabled) {
+      return;
+    }
+    const auto scope = prop_as_string(v.props, "style_override_scope", "self");
+    if (scope != "subtree") {
+      return;
+    }
+    for (const auto &kv : v.props) {
+      if (!known_style_keys_.contains(kv.first)) {
+        continue;
+      }
+      if (is_reserved_prop_key(kv.first)) {
+        continue;
+      }
+      inherited.insert_or_assign(kv.first, kv.second);
+      inherited_src.insert_or_assign(kv.first, "Override(subtree)");
+    }
+  }
+
+  static std::string style_src_prop_key(std::string_view k) {
+    std::string out;
+    out.reserve(10 + k.size());
+    out = "style_src.";
+    out.append(k);
+    return out;
+  }
+
+  static std::string style_chain_prop_key(std::string_view k) {
+    std::string out;
+    out.reserve(12 + k.size());
+    out = "style_chain.";
+    out.append(k);
+    return out;
+  }
+
+  static std::string style_prev_prop_key(std::string_view k) {
+    std::string out;
+    out.reserve(11 + k.size());
+    out = "style_prev.";
+    out.append(k);
+    return out;
+  }
+
+  static std::string style_prev_src_prop_key(std::string_view k) {
+    std::string out;
+    out.reserve(15 + k.size());
+    out = "style_prev_src.";
+    out.append(k);
+    return out;
+  }
+
+  struct BaseCacheEntry {
+    Props props;
+    std::unordered_map<std::string, std::string> src;
+    std::unordered_map<std::string, std::vector<std::string>> chain;
+  };
+
+  const BaseCacheEntry &base_for(std::string_view type, std::string_view variant,
+                                 std::string_view state) {
+    std::string key;
+    key.reserve(type.size() + variant.size() + state.size() + 2);
+    key.append(type);
+    key.push_back('|');
+    key.append(variant);
+    key.push_back('|');
+    key.append(state);
+    auto it = base_cache_.find(key);
+    if (it != base_cache_.end()) {
+      return it->second;
+    }
+    auto [it2, inserted] = base_cache_.try_emplace(std::move(key));
+    if (inserted) {
+      auto &e = it2->second;
+      auto apply_props = [&](const Props &p, std::string label) {
+        for (const auto &kv : p) {
+          e.props.insert_or_assign(kv.first, kv.second);
+          e.src.insert_or_assign(kv.first, label);
+          auto &ch = e.chain[kv.first];
+          if (ch.empty() || ch.back() != label) {
+            ch.push_back(label);
+          }
+        }
+      };
+
+      apply_props(resolved_sheet_.global, "Global");
+
+      const auto it_comp = resolved_sheet_.components.find(std::string{type});
+      if (it_comp != resolved_sheet_.components.end()) {
+        const auto &comp = it_comp->second;
+        apply_props(comp.props, std::string{type});
+
+        const auto it_var =
+            variant.empty() ? comp.variants.end() : comp.variants.find(std::string{variant});
+        if (it_var != comp.variants.end()) {
+          std::string label;
+          label.reserve(type.size() + variant.size() + 1);
+          label.append(type);
+          label.push_back('.');
+          label.append(variant);
+          apply_props(it_var->second.props, std::move(label));
+        }
+
+        if (!state.empty()) {
+          if (const auto it_cs = comp.states.find(std::string{state});
+              it_cs != comp.states.end()) {
+            std::string label;
+            label.reserve(type.size() + state.size() + 1);
+            label.append(type);
+            label.push_back('.');
+            label.append(state);
+            apply_props(it_cs->second, std::move(label));
+          }
+          if (it_var != comp.variants.end()) {
+            if (const auto it_vs = it_var->second.states.find(std::string{state});
+                it_vs != it_var->second.states.end()) {
+              std::string label;
+              label.reserve(type.size() + variant.size() + state.size() + 2);
+              label.append(type);
+              label.push_back('.');
+              label.append(variant);
+              label.push_back('.');
+              label.append(state);
+              apply_props(it_vs->second, std::move(label));
+            }
+          }
+        }
+      }
+    }
+    return it2->second;
+  }
+
+  void apply_node(ViewNode &v, const Props &inherited,
+                  const std::unordered_map<std::string, std::string> &inherited_src) {
+    const auto variant = node_variant(v);
+    const auto state = node_state(v);
+
+    const auto &base = base_for(v.type, variant, state);
+    Props computed = base.props;
+    auto computed_src = base.src;
+    for (const auto &kv : inherited) {
+      computed.insert_or_assign(kv.first, kv.second);
+      if (const auto it = inherited_src.find(kv.first); it != inherited_src.end()) {
+        computed_src.insert_or_assign(kv.first, it->second);
+      } else {
+        computed_src.insert_or_assign(kv.first, "Override(subtree)");
+      }
+    }
+
+    const auto allow_override = prop_as_bool(v.props, "style_override", true);
+    for (const auto &kv : computed) {
+      if (!known_style_keys_.contains(kv.first)) {
+        continue;
+      }
+      if (is_reserved_prop_key(kv.first)) {
+        continue;
+      }
+
+      const bool has_inherited = inherited.find(kv.first) != inherited.end();
+      const std::string inherited_label = [&]() -> std::string {
+        if (!has_inherited) {
+          return {};
+        }
+        if (const auto it = inherited_src.find(kv.first); it != inherited_src.end()) {
+          return it->second;
+        }
+        return "Override(subtree)";
+      }();
+
+      auto build_chain = [&](bool inline_override) -> std::string {
+        std::string out;
+        auto add = [&](std::string_view part) {
+          if (part.empty()) {
+            return;
+          }
+          if (!out.empty()) {
+            out.append(" -> ");
+          }
+          out.append(part);
+        };
+
+        if (const auto it = base.chain.find(kv.first); it != base.chain.end()) {
+          for (const auto &p : it->second) {
+            add(p);
+          }
+        }
+        add(inherited_label);
+        if (inline_override) {
+          add("Inline");
+        }
+        return out;
+      };
+
+      if (allow_override && v.props.contains(kv.first)) {
+        v.props.insert_or_assign(style_src_prop_key(kv.first),
+                                 PropValue{std::string{"Inline"}});
+        v.props.insert_or_assign(style_chain_prop_key(kv.first),
+                                 PropValue{build_chain(true)});
+        v.props.insert_or_assign(style_prev_prop_key(kv.first), kv.second);
+        const auto it = computed_src.find(kv.first);
+        v.props.insert_or_assign(
+            style_prev_src_prop_key(kv.first),
+            PropValue{it == computed_src.end() ? std::string{} : it->second});
+        continue;
+      }
+      v.props.insert_or_assign(kv.first, kv.second);
+      const auto it = computed_src.find(kv.first);
+      v.props.insert_or_assign(style_src_prop_key(kv.first),
+                               PropValue{it == computed_src.end() ? std::string{} : it->second});
+      v.props.insert_or_assign(style_chain_prop_key(kv.first),
+                               PropValue{build_chain(false)});
+    }
+
+    Props next_inherited = inherited;
+    auto next_inherited_src = inherited_src;
+    collect_subtree_overrides(v, next_inherited, next_inherited_src);
+    for (auto &c : v.children) {
+      apply_node(c, next_inherited, next_inherited_src);
+    }
+  }
+
+  ThemeRegistry registry_;
+  std::string active_theme_;
+  StyleSheetModel resolved_sheet_{};
+  std::unordered_set<std::string> known_style_keys_{};
+  bool resolved_dirty_{true};
+  struct ResolvedCacheEntry {
+    std::uint64_t version{};
+    StyleSheetModel sheet{};
+    std::unordered_set<std::string> known_keys{};
+  };
+  std::uint64_t registry_version_{1};
+  std::unordered_map<std::string, ResolvedCacheEntry> resolved_cache_{};
+  std::unordered_map<std::string, BaseCacheEntry> base_cache_{};
+};
+
 class ViewInstance {
 public:
   using ViewFn = std::function<ViewNode()>;
@@ -626,6 +1144,7 @@ public:
 
   void set_env_value(std::string key, PropValue value) {
     env_values_.insert_or_assign(std::move(key), std::move(value));
+    dirty_ = true;
   }
 
   const PropValue *env_value(const std::string &key) const {
@@ -635,6 +1154,7 @@ public:
 
   void set_env_object(std::string key, std::shared_ptr<void> obj) {
     env_objects_.insert_or_assign(std::move(key), std::move(obj));
+    dirty_ = true;
   }
 
   std::shared_ptr<void> env_object(const std::string &key) const {
@@ -740,6 +1260,12 @@ public:
       return false;
     }
 
+    const auto axis = prop_as_string(vn->props, "scroll_axis", "vertical");
+    const bool allow_y = axis == "vertical" || axis == "both";
+    if (!allow_y) {
+      return false;
+    }
+
     double cur = prop_as_float(vn->props, "scroll_y", 0.0f);
     if (!find_prop(vn->props, "scroll_y") && !vn->key.empty()) {
       if (const auto it = scroll_offsets_.find(vn->key);
@@ -790,6 +1316,8 @@ public:
 
   UpdateResult update() {
     const double now = now_ms();
+
+    poll_file_watches(now);
 
     bool any_timeline = false;
     for (auto &kv : timelines_) {
@@ -847,6 +1375,23 @@ public:
     }
   }
 
+  void register_file_watch(std::string key, std::string path, double interval_ms,
+                           bool fire_immediately,
+                           std::function<void()> on_change) {
+    if (key.empty()) {
+      return;
+    }
+    auto &w = file_watches_[key];
+    if (w.path != path) {
+      w.path = std::move(path);
+      w.last_check_ms = 0.0;
+      w.last_mtime_ticks = std::numeric_limits<std::int64_t>::min();
+    }
+    w.interval_ms = interval_ms;
+    w.fire_immediately = fire_immediately;
+    w.on_change = std::move(on_change);
+  }
+
   template <typename T> StateHandle<T> local_state(std::string key, T initial) {
     const auto it = local_states_.find(key);
     if (it != local_states_.end()) {
@@ -876,6 +1421,53 @@ private:
     double last_ms{};
   };
 
+  struct FileWatchReg {
+    std::string path;
+    double interval_ms{};
+    double last_check_ms{};
+    std::int64_t last_mtime_ticks{std::numeric_limits<std::int64_t>::min()};
+    bool fire_immediately{true};
+    std::function<void()> on_change;
+  };
+
+  void poll_file_watches(double now) {
+    for (auto &kv : file_watches_) {
+      auto &w = kv.second;
+      if (w.path.empty() || !(w.interval_ms > 0.0)) {
+        continue;
+      }
+      if (w.last_check_ms > 0.0 && now - w.last_check_ms < w.interval_ms) {
+        continue;
+      }
+      w.last_check_ms = now;
+
+      std::error_code ec;
+      const auto ft = std::filesystem::last_write_time(w.path, ec);
+      if (ec) {
+        continue;
+      }
+      const auto ticks =
+          static_cast<std::int64_t>(ft.time_since_epoch().count());
+
+      if (w.last_mtime_ticks == std::numeric_limits<std::int64_t>::min()) {
+        w.last_mtime_ticks = ticks;
+        if (w.fire_immediately && w.on_change) {
+          w.on_change();
+          dirty_ = true;
+        }
+        continue;
+      }
+      if (ticks == w.last_mtime_ticks) {
+        continue;
+      }
+      w.last_mtime_ticks = ticks;
+      if (w.on_change) {
+        w.on_change();
+      }
+      dirty_ = true;
+    }
+  }
+
   struct MatchedGeomEntry {
     std::vector<std::size_t> path;
     RectF frame;
@@ -885,6 +1477,40 @@ private:
     return k == "bg" || k == "border" || k == "color" || k == "tint" ||
            k == "track" || k == "fill" || k == "scrollbar_track" ||
            k == "scrollbar_thumb";
+  }
+
+  static bool prop_affects_layout(std::string_view k) {
+    return k == "width" || k == "height" || k == "min_width" ||
+           k == "min_length" || k == "padding" || k == "spacing" ||
+           k == "spacing_x" || k == "spacing_y" || k == "gap" ||
+           k == "cross_align" || k == "axis" || k == "rows" ||
+           k == "columns" || k == "default_width" || k == "default_height" ||
+           k == "track_height" || k == "thumb_size" || k == "thickness" ||
+           k == "font_size" || k == "value" || k == "title" ||
+           k == "placeholder" || k == "label" || k == "scroll_axis" ||
+           k == "scroll_x" || k == "scroll_y";
+  }
+
+  static bool patches_affect_layout(const std::vector<PatchOp> &patches) {
+    for (const auto &p : patches) {
+      bool affects = false;
+      std::visit(
+          [&](const auto &op) {
+            using T = std::decay_t<decltype(op)>;
+            if constexpr (std::is_same_v<T, PatchSetProp>) {
+              affects = prop_affects_layout(op.key);
+            } else if constexpr (std::is_same_v<T, PatchRemoveProp>) {
+              affects = prop_affects_layout(op.key);
+            } else {
+              affects = true;
+            }
+          },
+          p);
+      if (affects) {
+        return true;
+      }
+    }
+    return false;
   }
 
   static bool prop_is_animatable_key(const std::string &k) {
@@ -1191,25 +1817,45 @@ private:
   hit_test_impl(const ViewNode &v, const LayoutNode &l, float x, float y,
                 RectF clip, std::vector<std::size_t> &path) {
     const bool clip_self = prop_as_bool(v.props, "clip", false);
+    const float render_scale = prop_as_float(v.props, "render_scale", 1.0f);
+    RectF frame = l.frame;
+    if (render_scale != 1.0f) {
+      frame.w *= render_scale;
+      frame.h *= render_scale;
+    }
     if (clip_self) {
-      clip = intersect_rect(clip, l.frame);
+      clip = intersect_rect(clip, frame);
     }
     if (!contains(clip, x, y)) {
       return std::nullopt;
+    }
+
+    float x_local = x;
+    float y_local = y;
+    RectF clip_local = clip;
+    if (render_scale != 1.0f) {
+      const float ox = l.frame.x;
+      const float oy = l.frame.y;
+      x_local = ox + (x - ox) / render_scale;
+      y_local = oy + (y - oy) / render_scale;
+      clip_local.x = ox + (clip.x - ox) / render_scale;
+      clip_local.y = oy + (clip.y - oy) / render_scale;
+      clip_local.w = clip.w / render_scale;
+      clip_local.h = clip.h / render_scale;
     }
 
     const auto n = std::min(v.children.size(), l.children.size());
     for (std::size_t i = n; i > 0; --i) {
       const auto idx = i - 1;
       path.push_back(idx);
-      if (auto hit = hit_test_impl(v.children[idx], l.children[idx], x, y, clip,
-                                   path)) {
+      if (auto hit = hit_test_impl(v.children[idx], l.children[idx], x_local, y_local,
+                                   clip_local, path)) {
         return hit;
       }
       path.pop_back();
     }
 
-    if (contains(l.frame, x, y) && node_hittable(v)) {
+    if (contains(l.frame, x_local, y_local) && node_hittable(v)) {
       return HitResult{path};
     }
     return std::nullopt;
@@ -1424,7 +2070,15 @@ private:
           d.key = sv->key;
           d.start_x = x;
           d.start_y = y;
+          d.last_x = x;
           d.last_y = y;
+          double sx = prop_as_float(sv->props, "scroll_x", 0.0f);
+          if (!find_prop(sv->props, "scroll_x") && !sv->key.empty()) {
+            if (const auto it = scroll_offsets_x_.find(sv->key);
+                it != scroll_offsets_x_.end()) {
+              sx = it->second;
+            }
+          }
           double sy = prop_as_float(sv->props, "scroll_y", 0.0f);
           if (!find_prop(sv->props, "scroll_y") && !sv->key.empty()) {
             if (const auto it = scroll_offsets_.find(sv->key);
@@ -1432,6 +2086,7 @@ private:
               sy = it->second;
             }
           }
+          d.start_scroll_x = sx;
           d.start_scroll_y = sy;
           d.activated = false;
           scroll_drags_.insert_or_assign(pointer, std::move(d));
@@ -1447,7 +2102,9 @@ private:
     std::string key;
     float start_x{};
     float start_y{};
+    float last_x{};
     float last_y{};
+    double start_scroll_x{};
     double start_scroll_y{};
     bool activated{};
   };
@@ -1470,6 +2127,12 @@ private:
 
   void restore_scroll_offsets(ViewNode &root) {
     if (root.type == "ScrollView" && !root.key.empty()) {
+      if (!find_prop(root.props, "scroll_x")) {
+        const auto it = scroll_offsets_x_.find(root.key);
+        if (it != scroll_offsets_x_.end()) {
+          root.props.insert_or_assign("scroll_x", PropValue{it->second});
+        }
+      }
       if (!find_prop(root.props, "scroll_y")) {
         const auto it = scroll_offsets_.find(root.key);
         if (it != scroll_offsets_.end()) {
@@ -1502,20 +2165,67 @@ private:
     }
 
     if (event_name == "pointer_move") {
+      it->second.last_x = x;
       it->second.last_y = y;
+      const float dx = x - it->second.start_x;
       const float dy = y - it->second.start_y;
+      const auto axis = prop_as_string(vn->props, "scroll_axis", "vertical");
+      const bool allow_x = axis == "horizontal" || axis == "both";
+      const bool allow_y = axis == "vertical" || axis == "both";
       if (!it->second.activated) {
-        if (std::abs(dy) < 3.0f) {
+        const float d = axis == "horizontal"
+                            ? std::abs(dx)
+                            : (axis == "both" ? std::max(std::abs(dx), std::abs(dy))
+                                              : std::abs(dy));
+        if (d < 3.0f) {
           return false;
         }
         it->second.activated = true;
         capture_pointer_internal(pointer, *path, vn->key);
       }
 
-      const double next_scroll = it->second.start_scroll_y + static_cast<double>(dy);
-      vn->props.insert_or_assign("scroll_y", PropValue{next_scroll});
+      double next_scroll_x = it->second.start_scroll_x + static_cast<double>(dx);
+      double next_scroll_y = it->second.start_scroll_y + static_cast<double>(dy);
+      float max_scroll_x = 0.0f;
+      float max_scroll_y = 0.0f;
+      if (const auto *ln = layout_at_path(layout_, *path)) {
+        max_scroll_x = ln->scroll_max_x;
+        max_scroll_y = ln->scroll_max_y;
+      }
+      if (!allow_x) {
+        next_scroll_x = it->second.start_scroll_x;
+      } else {
+        if (next_scroll_x < 0.0) {
+          next_scroll_x = 0.0;
+        }
+        if (next_scroll_x > static_cast<double>(max_scroll_x)) {
+          next_scroll_x = static_cast<double>(max_scroll_x);
+        }
+      }
+      if (!allow_y) {
+        next_scroll_y = it->second.start_scroll_y;
+      } else {
+        if (next_scroll_y < 0.0) {
+          next_scroll_y = 0.0;
+        }
+        if (next_scroll_y > static_cast<double>(max_scroll_y)) {
+          next_scroll_y = static_cast<double>(max_scroll_y);
+        }
+      }
+
+      if (allow_x) {
+        vn->props.insert_or_assign("scroll_x", PropValue{next_scroll_x});
+      }
+      if (allow_y) {
+        vn->props.insert_or_assign("scroll_y", PropValue{next_scroll_y});
+      }
       if (!vn->key.empty()) {
-        scroll_offsets_.insert_or_assign(vn->key, next_scroll);
+        if (allow_x) {
+          scroll_offsets_x_.insert_or_assign(vn->key, next_scroll_x);
+        }
+        if (allow_y) {
+          scroll_offsets_.insert_or_assign(vn->key, next_scroll_y);
+        }
       }
       layout_ = layout_tree(tree_, viewport_);
       render_ops_ = build_render_ops(tree_, layout_);
@@ -1590,6 +2300,7 @@ private:
     env_values_.clear();
     env_objects_.clear();
     timelines_.clear();
+    file_watches_.clear();
 
     detail::DependencyCollector collector;
     detail::active_collector = &collector;
@@ -2107,6 +2818,13 @@ private:
     restore_scroll_offsets(new_tree);
     apply_text_bindings(apply_text_bindings, new_tree);
 
+    if (auto obj = env_object("style.manager")) {
+      if (auto sm = std::static_pointer_cast<StyleManager>(std::move(obj))) {
+        detail::record_dependency(sm.get());
+        sm->apply_to_tree(new_tree);
+      }
+    }
+
     detail::active_collector = nullptr;
     detail::active_event_collector = nullptr;
     detail::active_build_instance = nullptr;
@@ -2197,91 +2915,99 @@ private:
 
     handlers_ = std::move(event_collector.handlers);
 
-    layout_ = layout_tree(tree_, viewport_);
-
-    std::unordered_map<std::string, RectF> old_frames;
-    {
-      if (!old_tree.type.empty() && !old_layout.type.empty()) {
-        auto collect_matched = [&](auto &&self, const ViewNode &v,
-                                   const LayoutNode &l,
-                                   std::unordered_map<std::string, RectF> &out)
-            -> void {
-          const auto ns = prop_as_string(v.props, "matched_geom_ns", "");
-          const auto id = prop_as_string(v.props, "matched_geom_id", "");
-          if (!ns.empty() && !id.empty()) {
-            out.insert_or_assign(ns + "|" + id, l.frame);
-          }
-          const auto n = std::min(v.children.size(), l.children.size());
-          for (std::size_t i = 0; i < n; ++i) {
-            self(self, v.children[i], l.children[i], out);
-          }
-        };
-        collect_matched(collect_matched, old_tree, old_layout, old_frames);
-      }
+    const bool layout_rebuilt =
+        old_tree.type.empty() || patches_affect_layout(patches);
+    if (layout_rebuilt) {
+      layout_ = layout_tree(tree_, viewport_);
+    } else {
+      layout_ = std::move(old_layout);
     }
 
-    auto apply_matched = [&](auto &&self, ViewNode &v, const LayoutNode &l,
-                             std::vector<std::size_t> &path) -> void {
-      const auto ns = prop_as_string(v.props, "matched_geom_ns", "");
-      const auto id = prop_as_string(v.props, "matched_geom_id", "");
-      if (!ns.empty() && !id.empty()) {
-        const auto it_old = old_frames.find(ns + "|" + id);
-        if (it_old != old_frames.end()) {
-          const auto dx = static_cast<double>(it_old->second.x - l.frame.x);
-          const auto dy = static_cast<double>(it_old->second.y - l.frame.y);
-          if (dx != 0.0 || dy != 0.0) {
-            const auto s = [&]() -> std::optional<AnimationSpec> {
-              if (override_spec) {
-                return override_spec;
-              }
-              return animation_spec_for_path(tree_, path);
-            }();
-            if (s) {
-              const auto base_x =
-                  static_cast<double>(prop_as_float(v.props, "render_offset_x", 0.0f));
-              const auto base_y =
-                  static_cast<double>(prop_as_float(v.props, "render_offset_y", 0.0f));
-
-              const double from_x = base_x + dx;
-              const double from_y = base_y + dy;
-              v.props.insert_or_assign("render_offset_x", PropValue{from_x});
-              v.props.insert_or_assign("render_offset_y", PropValue{from_y});
-
-              PropAnim ax;
-              ax.path = path;
-              ax.prop_key = "render_offset_x";
-              ax.from = PropValue{from_x};
-              ax.to = PropValue{base_x};
-              ax.start_ms = anim_start_ms;
-              ax.duration_ms = s->duration_ms;
-              ax.delay_ms = s->delay_ms;
-              anims_.push_back(std::move(ax));
-
-              PropAnim ay;
-              ay.path = path;
-              ay.prop_key = "render_offset_y";
-              ay.from = PropValue{from_y};
-              ay.to = PropValue{base_y};
-              ay.start_ms = anim_start_ms;
-              ay.duration_ms = s->duration_ms;
-              ay.delay_ms = s->delay_ms;
-              anims_.push_back(std::move(ay));
+    if (layout_rebuilt) {
+      std::unordered_map<std::string, RectF> old_frames;
+      {
+        if (!old_tree.type.empty() && !old_layout.type.empty()) {
+          auto collect_matched = [&](auto &&self, const ViewNode &v,
+                                     const LayoutNode &l,
+                                     std::unordered_map<std::string, RectF> &out)
+              -> void {
+            const auto ns = prop_as_string(v.props, "matched_geom_ns", "");
+            const auto id = prop_as_string(v.props, "matched_geom_id", "");
+            if (!ns.empty() && !id.empty()) {
+              out.insert_or_assign(ns + "|" + id, l.frame);
             }
-          }
+            const auto n = std::min(v.children.size(), l.children.size());
+            for (std::size_t i = 0; i < n; ++i) {
+              self(self, v.children[i], l.children[i], out);
+            }
+          };
+          collect_matched(collect_matched, old_tree, old_layout, old_frames);
         }
       }
 
-      const auto n = std::min(v.children.size(), l.children.size());
-      for (std::size_t i = 0; i < n; ++i) {
-        path.push_back(i);
-        self(self, v.children[i], l.children[i], path);
-        path.pop_back();
-      }
-    };
+      auto apply_matched = [&](auto &&self, ViewNode &v, const LayoutNode &l,
+                               std::vector<std::size_t> &path) -> void {
+        const auto ns = prop_as_string(v.props, "matched_geom_ns", "");
+        const auto id = prop_as_string(v.props, "matched_geom_id", "");
+        if (!ns.empty() && !id.empty()) {
+          const auto it_old = old_frames.find(ns + "|" + id);
+          if (it_old != old_frames.end()) {
+            const auto dx = static_cast<double>(it_old->second.x - l.frame.x);
+            const auto dy = static_cast<double>(it_old->second.y - l.frame.y);
+            if (dx != 0.0 || dy != 0.0) {
+              const auto s = [&]() -> std::optional<AnimationSpec> {
+                if (override_spec) {
+                  return override_spec;
+                }
+                return animation_spec_for_path(tree_, path);
+              }();
+              if (s) {
+                const auto base_x = static_cast<double>(
+                    prop_as_float(v.props, "render_offset_x", 0.0f));
+                const auto base_y = static_cast<double>(
+                    prop_as_float(v.props, "render_offset_y", 0.0f));
 
-    {
-      std::vector<std::size_t> path;
-      apply_matched(apply_matched, tree_, layout_, path);
+                const double from_x = base_x + dx;
+                const double from_y = base_y + dy;
+                v.props.insert_or_assign("render_offset_x", PropValue{from_x});
+                v.props.insert_or_assign("render_offset_y", PropValue{from_y});
+
+                PropAnim ax;
+                ax.path = path;
+                ax.prop_key = "render_offset_x";
+                ax.from = PropValue{from_x};
+                ax.to = PropValue{base_x};
+                ax.start_ms = anim_start_ms;
+                ax.duration_ms = s->duration_ms;
+                ax.delay_ms = s->delay_ms;
+                anims_.push_back(std::move(ax));
+
+                PropAnim ay;
+                ay.path = path;
+                ay.prop_key = "render_offset_y";
+                ay.from = PropValue{from_y};
+                ay.to = PropValue{base_y};
+                ay.start_ms = anim_start_ms;
+                ay.duration_ms = s->duration_ms;
+                ay.delay_ms = s->delay_ms;
+                anims_.push_back(std::move(ay));
+              }
+            }
+          }
+        }
+
+        const auto n = std::min(v.children.size(), l.children.size());
+        for (std::size_t i = 0; i < n; ++i) {
+          path.push_back(i);
+          self(self, v.children[i], l.children[i], path);
+          path.pop_back();
+        }
+      };
+
+      {
+        std::vector<std::size_t> path;
+        apply_matched(apply_matched, tree_, layout_, path);
+      }
     }
 
     render_ops_ = build_render_ops(tree_, layout_);
@@ -2297,7 +3023,7 @@ private:
     }
 
     dirty_ = false;
-    return UpdateResult{true, std::move(patches), true, true};
+    return UpdateResult{true, std::move(patches), layout_rebuilt, true};
   }
 
   ViewFn fn_;
@@ -2309,6 +3035,7 @@ private:
   std::unordered_map<std::uint64_t, std::function<void()>> handlers_{};
   std::unordered_map<int, CaptureTarget> captures_{};
   std::unordered_set<int> pointers_down_{};
+  std::unordered_map<std::string, double> scroll_offsets_x_{};
   std::unordered_map<std::string, double> scroll_offsets_{};
   std::unordered_map<int, ScrollDrag> scroll_drags_{};
   std::optional<FocusTarget> focus_{};
@@ -2320,6 +3047,7 @@ private:
   std::optional<AnimationSpec> pending_animation_{};
   std::vector<PropAnim> anims_{};
   std::unordered_map<std::string, TimelineReg> timelines_{};
+  std::unordered_map<std::string, FileWatchReg> file_watches_{};
   bool dirty_{true};
 };
 
@@ -2839,6 +3567,17 @@ inline ViewNode TimelineView(std::string key, double interval_ms, ContentFn fn) 
   }
   auto now = local_state<double>(key + ":timeline_now", now_ms());
   return fn(now.get());
+}
+
+inline ViewNode WatchFile(std::string key, std::string path, double interval_ms,
+                          std::function<void()> on_change,
+                          bool fire_immediately = true) {
+  if (detail::active_build_instance) {
+    detail::active_build_instance->register_file_watch(
+        std::move(key), std::move(path), interval_ms, fire_immediately,
+        std::move(on_change));
+  }
+  return view("Spacer").build();
 }
 
 inline ViewNode matchedGeometryEffect(ViewNode node, std::string ns, std::string id) {

@@ -35,6 +35,9 @@ struct LayoutNode {
   std::string type;
   RectF frame;
   std::vector<LayoutNode> children;
+  float scroll_x{};
+  float scroll_content_w{};
+  float scroll_max_x{};
   float scroll_y{};
   float scroll_content_h{};
   float scroll_max_y{};

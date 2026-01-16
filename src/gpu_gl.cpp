@@ -53,6 +53,47 @@ using GLfloat = float;
 using namespace duorou::ui;
 
 #if defined(_WIN32)
+static std::string duorou_current_dir_string() {
+#if defined(__cpp_lib_filesystem)
+  std::error_code ec;
+  auto p = std::filesystem::current_path(ec);
+  if (ec) {
+    return {};
+  }
+  return p.string();
+#else
+  const DWORD len = GetCurrentDirectoryA(0, nullptr);
+  if (len == 0) {
+    return {};
+  }
+  std::string out;
+  out.resize(static_cast<std::size_t>(len));
+  const DWORD got = GetCurrentDirectoryA(len, out.data());
+  if (got == 0) {
+    return {};
+  }
+  if (!out.empty() && out.back() == '\0') {
+    out.pop_back();
+  }
+  return out;
+#endif
+}
+#else
+static std::string duorou_current_dir_string() {
+#if defined(__cpp_lib_filesystem)
+  std::error_code ec;
+  auto p = std::filesystem::current_path(ec);
+  if (ec) {
+    return {};
+  }
+  return p.string();
+#else
+  return {};
+#endif
+}
+#endif
+
+#if defined(_WIN32)
 #define DUOROU_GL_APIENTRY __stdcall
 #else
 #define DUOROU_GL_APIENTRY
@@ -1496,7 +1537,7 @@ int main(int argc, char **argv) {
   auto popover_x = state<double>(0.0);
   auto popover_y = state<double>(0.0);
   auto file_dialog_presented = state<bool>(false);
-  auto file_dialog_dir = state<std::string>(std::filesystem::current_path().string());
+  auto file_dialog_dir = state<std::string>(duorou_current_dir_string());
   auto file_dialog_selected = state<std::string>(std::string{});
   auto file_dialog_result = state<std::string>(std::string{});
 
@@ -2310,7 +2351,7 @@ int main(int argc, char **argv) {
                                          fullscreen_presented.set(false);
                                          popover_presented.set(false);
                                          file_dialog_selected.set(std::string{});
-                                         file_dialog_dir.set(std::filesystem::current_path().string());
+                                         file_dialog_dir.set(duorou_current_dir_string());
                                          file_dialog_presented.set(true);
                                        }))
                                 .build(),
@@ -2455,6 +2496,7 @@ int main(int argc, char **argv) {
           }
 
           if (file_dialog_presented.get()) {
+#if defined(__cpp_lib_filesystem)
             using fs_path = std::filesystem::path;
             fs_path cur = fs_path{file_dialog_dir.get()};
             std::error_code ec;
@@ -2605,6 +2647,35 @@ int main(int argc, char **argv) {
                 },
                 on_pointer_up([file_dialog_presented]() mutable { file_dialog_presented.set(false); }),
                 560.0f));
+#else
+            c.add(duorou::ui::AlertDialog(
+                {
+                    view("Text")
+                        .prop("value", "Open File (disabled)")
+                        .prop("font_size", 16.0)
+                        .build(),
+                    view("Text")
+                        .prop("value", "std::filesystem is not available in this build.")
+                        .prop("font_size", 12.0)
+                        .prop("color", 0xFFB0B0B0)
+                        .build(),
+                    view("Row")
+                        .prop("spacing", 8.0)
+                        .prop("cross_align", "center")
+                        .children({
+                            view("Spacer").build(),
+                            view("Button")
+                                .prop("title", "Close")
+                                .event("pointer_up", on_pointer_up([file_dialog_presented]() mutable {
+                                         file_dialog_presented.set(false);
+                                       }))
+                                .build(),
+                        })
+                        .build(),
+                },
+                on_pointer_up([file_dialog_presented]() mutable { file_dialog_presented.set(false); }),
+                420.0f));
+#endif
           }
         })
         .build();
