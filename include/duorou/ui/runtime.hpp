@@ -30,6 +30,13 @@
 #include <variant>
 #include <vector>
 
+#if defined(DUOROU_HAS_MINISWIFT)
+#include <interpreter/Interpreter.h>
+#include <lexer/Lexer.h>
+#include <parser/Parser.h>
+#include <ui/UIIntegration.h>
+#endif
+
 #if defined(_WIN32)
 #if !defined(NOMINMAX)
 #define NOMINMAX 1
@@ -160,12 +167,54 @@ public:
 class MiniSwiftEngine final : public Engine {
 public:
   UiEvalResult eval_ui(std::string_view code) override {
+#if defined(DUOROU_HAS_MINISWIFT)
+    auto &ui = MiniSwift::UI::UIIntegration::getInstance();
+    ui.cleanup();
+    ui.initialize();
+
+    std::string src{code};
+
+    miniswift::Lexer lexer(src);
+    std::vector<miniswift::Token> tokens = lexer.scanTokens();
+    miniswift::Parser parser(tokens);
+
+    std::vector<std::unique_ptr<miniswift::Stmt>> statements;
+    try {
+      statements = parser.parse();
+    } catch (const std::exception &e) {
+      return UiEvalResult{ViewNode{}, e.what(), false};
+    }
+
+    miniswift::Interpreter interpreter;
+    try {
+      interpreter.interpret(statements);
+    } catch (const std::exception &e) {
+      return UiEvalResult{ViewNode{}, e.what(), false};
+    }
+
+#if defined(MINISWIFT_UI_USE_DUOROU)
+    auto root = ui.buildDuorouMainView();
+    if (root.type.empty()) {
+      return UiEvalResult{
+          ViewNode{},
+          "root view missing (call UIApplication.shared.setRootView(root))",
+          false};
+    }
+    return UiEvalResult{std::move(root), {}, true};
+#else
+    return UiEvalResult{
+        ViewNode{},
+        "MINISWIFT_UI_USE_DUOROU is disabled; cannot build ViewNode tree",
+        false};
+#endif
+#else
     Parser p{code};
     auto r = p.parse_program();
     if (!r.ok) {
       return UiEvalResult{ViewNode{}, std::move(r.error), false};
     }
     return UiEvalResult{std::move(r.node), {}, true};
+#endif
   }
 
 private:
@@ -676,6 +725,54 @@ private:
   };
 };
 } // namespace dsl
+#if defined(DUOROU_HAS_MINISWIFT)
+class MiniSwiftInterpreterEngine final : public dsl::Engine {
+public:
+  dsl::UiEvalResult eval_ui(std::string_view code) override {
+    auto &ui = MiniSwift::UI::UIIntegration::getInstance();
+    ui.cleanup();
+    ui.initialize();
+
+    std::string src{code};
+
+    miniswift::Lexer lexer(src);
+    std::vector<miniswift::Token> tokens = lexer.scanTokens();
+    miniswift::Parser parser(tokens);
+
+    std::vector<std::unique_ptr<miniswift::Stmt>> statements;
+    try {
+      statements = parser.parse();
+    } catch (const std::exception &e) {
+      return dsl::UiEvalResult{ViewNode{}, e.what(), false};
+    }
+
+    miniswift::Interpreter interpreter;
+    try {
+      interpreter.interpret(statements);
+    } catch (const std::exception &e) {
+      return dsl::UiEvalResult{ViewNode{}, e.what(), false};
+    }
+
+#if defined(MINISWIFT_UI_USE_DUOROU)
+    auto root = ui.buildDuorouMainView();
+    if (root.type.empty()) {
+      return dsl::UiEvalResult{
+          ViewNode{},
+          "root view missing (call UIApplication.shared.setRootView(root))",
+          false};
+    }
+    return dsl::UiEvalResult{std::move(root), {}, true};
+#else
+    return dsl::UiEvalResult{
+        ViewNode{},
+        "MINISWIFT_UI_USE_DUOROU is disabled; cannot build ViewNode tree",
+        false};
+#endif
+  }
+};
+#endif
+
+
 
 
 inline void Subscription::reset() {
@@ -1713,6 +1810,42 @@ public:
       return std::nullopt;
     }
     return ln->frame;
+  }
+
+  std::optional<std::vector<std::size_t>> path_by_key(const std::string &key) const {
+    return find_path_by_key(tree_, key);
+  }
+
+  std::optional<RectF> layout_frame_by_key(const std::string &key) const {
+    if (auto p = find_path_by_key(tree_, key)) {
+      return layout_frame_at_path(*p);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::vector<std::size_t>> hit_path(float x, float y) const {
+    if (const auto hit = hit_test(tree_, layout_, x, y)) {
+      return hit->path;
+    }
+    return std::nullopt;
+  }
+
+  std::string hit_key(float x, float y) const {
+    if (auto p = hit_path(x, y)) {
+      auto path = *p;
+      for (;;) {
+        if (const auto *vn = node_at_path(tree_, path)) {
+          if (!vn->key.empty()) {
+            return vn->key;
+          }
+        }
+        if (path.empty()) {
+          break;
+        }
+        path.pop_back();
+      }
+    }
+    return {};
   }
 
   bool dispatch_click(float x, float y) {
@@ -4132,6 +4265,14 @@ inline std::optional<RectF> target_frame() {
   }
   return detail::active_dispatch_context->instance->layout_frame_at_path(
       detail::active_dispatch_context->target_path);
+}
+
+inline std::string hit_key_at(float x, float y) {
+  if (!detail::active_dispatch_context ||
+      !detail::active_dispatch_context->instance) {
+    return {};
+  }
+  return detail::active_dispatch_context->instance->hit_key(x, y);
 }
 
 template <typename Fn>

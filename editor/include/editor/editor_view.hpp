@@ -3,6 +3,7 @@
 #include <duorou/ui/runtime.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cctype>
 #include <filesystem>
@@ -37,22 +38,442 @@ inline ViewNode panel(std::string title, ViewNode content, float width) {
       .build();
 }
 
-inline ViewNode tree_panel() {
+inline bool starts_with(std::string_view s, std::string_view prefix) {
+  return s.size() >= prefix.size() && s.substr(0, prefix.size()) == prefix;
+}
+
+inline bool is_container_type(std::string_view type) {
+  return type == "Column" || type == "Row" || type == "Box" || type == "Overlay" ||
+         type == "Grid" || type == "ScrollView";
+}
+
+inline ViewNode *find_node_by_key_mut(ViewNode &root, std::string_view key) {
+  if (key.empty()) {
+    return nullptr;
+  }
+  if (root.key == key) {
+    return &root;
+  }
+  for (auto &c : root.children) {
+    if (auto *r = find_node_by_key_mut(c, key)) {
+      return r;
+    }
+  }
+  return nullptr;
+}
+
+inline bool find_path_by_key_impl(const ViewNode &root, std::string_view key,
+                                 std::vector<std::size_t> &path) {
+  if (key.empty()) {
+    return false;
+  }
+  if (root.key == key) {
+    return true;
+  }
+  for (std::size_t i = 0; i < root.children.size(); ++i) {
+    path.push_back(i);
+    if (find_path_by_key_impl(root.children[i], key, path)) {
+      return true;
+    }
+    path.pop_back();
+  }
+  return false;
+}
+
+inline std::vector<std::size_t> find_path_by_key(const ViewNode &root,
+                                                 std::string_view key) {
+  std::vector<std::size_t> path;
+  (void)find_path_by_key_impl(root, key, path);
+  return path;
+}
+
+inline ViewNode *node_at_path_mut(ViewNode &root,
+                                  const std::vector<std::size_t> &path) {
+  ViewNode *cur = &root;
+  for (const auto idx : path) {
+    if (idx >= cur->children.size()) {
+      return nullptr;
+    }
+    cur = &cur->children[idx];
+  }
+  return cur;
+}
+
+inline ViewInstance *active_instance() {
+  if (!::duorou::ui::detail::active_dispatch_context) {
+    return nullptr;
+  }
+  return ::duorou::ui::detail::active_dispatch_context->instance;
+}
+
+inline std::optional<RectF> active_layout_frame_by_key(const std::string &key) {
+  if (auto *inst = active_instance()) {
+    return inst->layout_frame_by_key(key);
+  }
+  return std::nullopt;
+}
+
+struct InsertPlan {
+  bool valid{};
+  std::string where;
+  std::string axis;
+  std::string container_key;
+  std::string parent_key;
+  std::int64_t index{};
+  RectF container_frame{};
+};
+
+inline InsertPlan compute_insert_plan(const ViewNode &design_root, float x, float y) {
+  InsertPlan out;
+
+  const auto hit = ::duorou::ui::hit_key_at(x, y);
+  if (hit.empty()) {
+    return out;
+  }
+
+  std::string target_key;
+  if (hit == "editor:canvas") {
+    target_key = "design:root";
+  } else if (starts_with(hit, "design:")) {
+    target_key = hit;
+  } else {
+    return out;
+  }
+
+  auto path = find_path_by_key(design_root, target_key);
+  if (design_root.key != target_key && path.empty()) {
+    return out;
+  }
+
+  auto *root_mut = const_cast<ViewNode *>(&design_root);
+  auto *container = root_mut;
+  std::vector<std::size_t> container_path = path;
+  if (design_root.key != target_key) {
+    container = node_at_path_mut(*root_mut, container_path);
+  }
+  while (container && !is_container_type(container->type)) {
+    if (container_path.empty()) {
+      break;
+    }
+    container_path.pop_back();
+    container = node_at_path_mut(*root_mut, container_path);
+  }
+  if (!container || !is_container_type(container->type) || container->key.empty()) {
+    return out;
+  }
+
+  out.valid = true;
+  out.container_key = container->key;
+  out.where = "inside";
+  out.axis = "v";
+  out.parent_key.clear();
+  out.index = static_cast<std::int64_t>(container->children.size());
+
+  if (const auto fr = active_layout_frame_by_key(out.container_key)) {
+    out.container_frame = *fr;
+  }
+
+  if (out.container_key == "design:root") {
+    return out;
+  }
+
+  if (!container_path.empty()) {
+    const auto container_idx = container_path.back();
+    auto parent_path = container_path;
+    parent_path.pop_back();
+    const auto *parent =
+        parent_path.empty() ? &design_root : node_at_path_mut(*root_mut, parent_path);
+    if (parent && !parent->key.empty()) {
+      out.parent_key = parent->key;
+      out.axis = parent->type == "Row" ? "h" : "v";
+      out.index = static_cast<std::int64_t>(container_idx + 1);
+      out.where = "after";
+      if (out.container_frame.w > 0.0f && out.container_frame.h > 0.0f) {
+        const float primary = out.axis == "h" ? out.container_frame.w : out.container_frame.h;
+        const float t = std::max(6.0f, std::min(12.0f, primary * 0.25f));
+        if (out.axis == "h") {
+          if (x < out.container_frame.x + t) {
+            out.where = "before";
+            out.index = static_cast<std::int64_t>(container_idx);
+          } else if (x > out.container_frame.x + out.container_frame.w - t) {
+            out.where = "after";
+            out.index = static_cast<std::int64_t>(container_idx + 1);
+          } else {
+            out.where = "inside";
+            out.index = static_cast<std::int64_t>(container->children.size());
+          }
+        } else {
+          if (y < out.container_frame.y + t) {
+            out.where = "before";
+            out.index = static_cast<std::int64_t>(container_idx);
+          } else if (y > out.container_frame.y + out.container_frame.h - t) {
+            out.where = "after";
+            out.index = static_cast<std::int64_t>(container_idx + 1);
+          } else {
+            out.where = "inside";
+            out.index = static_cast<std::int64_t>(container->children.size());
+          }
+        }
+      } else {
+        out.where = "inside";
+        out.index = static_cast<std::int64_t>(container->children.size());
+      }
+    }
+  }
+
+  return out;
+}
+
+inline ViewNode make_default_node(TextureHandle demo_tex_handle,
+                                 std::string_view type, std::string key) {
+  if (type == "Button") {
+    return view("Button").key(std::move(key)).prop("title", "Button").build();
+  }
+  if (type == "Text") {
+    return view("Text").key(std::move(key)).prop("value", "Text").build();
+  }
+  if (type == "TextField") {
+    return view("TextField")
+        .key(std::move(key))
+        .prop("value", "")
+        .prop("placeholder", "Input")
+        .prop("width", 260.0)
+        .build();
+  }
+  if (type == "Image") {
+    return view("Image")
+        .key(std::move(key))
+        .prop("texture", static_cast<std::int64_t>(demo_tex_handle))
+        .prop("width", 64.0)
+        .prop("height", 64.0)
+        .build();
+  }
+  if (type == "Row") {
+    return view("Row")
+        .key(std::move(key))
+        .prop("spacing", 10.0)
+        .prop("cross_align", "center")
+        .children({})
+        .build();
+  }
+  if (type == "Box") {
+    return view("Box")
+        .key(std::move(key))
+        .prop("padding", 12.0)
+        .prop("bg", 0xFF202020)
+        .prop("border", 0xFF3A3A3A)
+        .prop("border_width", 1.0)
+        .children({})
+        .build();
+  }
+  return view("Column")
+      .key(std::move(key))
+      .prop("spacing", 12.0)
+      .prop("cross_align", "start")
+      .children({})
+      .build();
+}
+
+inline void push_history(StateHandle<std::vector<ViewNode>> history,
+                         StateHandle<std::int64_t> history_idx,
+                         const ViewNode &root) {
+  auto h = history.get();
+  auto idx = history_idx.get();
+  if (idx >= 0 && idx < static_cast<std::int64_t>(h.size())) {
+    h.resize(static_cast<std::size_t>(idx + 1));
+  } else if (!h.empty() && idx != static_cast<std::int64_t>(h.size() - 1)) {
+    idx = static_cast<std::int64_t>(h.size() - 1);
+  }
+  h.push_back(root);
+  history.set(std::move(h));
+  history_idx.set(static_cast<std::int64_t>(history.get().size() - 1));
+}
+
+inline ViewNode tree_panel(TextureHandle demo_tex_handle,
+                           StateHandle<ViewNode> design_root,
+                           StateHandle<std::string> selected_key,
+                           StateHandle<std::vector<ViewNode>> history,
+                           StateHandle<std::int64_t> history_idx) {
+  auto drag_active = local_state<bool>("editor:lib_drag_active", false);
+  auto drag_type = local_state<std::string>("editor:lib_drag_type", "");
+  auto drag_x = local_state<double>("editor:lib_drag_x", 0.0);
+  auto drag_y = local_state<double>("editor:lib_drag_y", 0.0);
+  auto node_counter = local_state<std::int64_t>("editor:node_counter", 1);
+  auto insert_show = local_state<bool>("editor:insert_show", false);
+  auto insert_mode = local_state<std::string>("editor:insert_mode", "");
+  auto insert_axis = local_state<std::string>("editor:insert_axis", "");
+  auto insert_fx = local_state<double>("editor:insert_fx", 0.0);
+  auto insert_fy = local_state<double>("editor:insert_fy", 0.0);
+  auto insert_fw = local_state<double>("editor:insert_fw", 0.0);
+  auto insert_fh = local_state<double>("editor:insert_fh", 0.0);
+
+  auto add_node = [demo_tex_handle, design_root, selected_key, history, history_idx,
+                   node_counter](std::string type, InsertPlan plan) mutable {
+    if (type.empty()) {
+      return;
+    }
+    if (!plan.valid) {
+      return;
+    }
+
+    auto root = design_root.get();
+    if (root.type.empty()) {
+      root = view("Column")
+                 .key("design:root")
+                 .prop("spacing", 12.0)
+                 .prop("cross_align", "start")
+                 .children({})
+                 .build();
+    }
+
+    const auto next_id = node_counter.get();
+    node_counter.set(next_id + 1);
+    std::string new_key = "design:n" + std::to_string(static_cast<long long>(next_id));
+    auto node = make_default_node(demo_tex_handle, type, new_key);
+
+    if (plan.where == "inside") {
+      ViewNode *container = find_node_by_key_mut(root, plan.container_key);
+      if (!container || !is_container_type(container->type)) {
+        container = find_node_by_key_mut(root, "design:root");
+      }
+      if (!container) {
+        return;
+      }
+      const auto idx = std::clamp<std::int64_t>(
+          plan.index, 0, static_cast<std::int64_t>(container->children.size()));
+      container->children.insert(container->children.begin() + static_cast<std::ptrdiff_t>(idx),
+                                 std::move(node));
+    } else {
+      ViewNode *parent = find_node_by_key_mut(root, plan.parent_key);
+      if (!parent || !is_container_type(parent->type)) {
+        parent = find_node_by_key_mut(root, "design:root");
+      }
+      if (!parent) {
+        return;
+      }
+      const auto idx = std::clamp<std::int64_t>(
+          plan.index, 0, static_cast<std::int64_t>(parent->children.size()));
+      parent->children.insert(parent->children.begin() + static_cast<std::ptrdiff_t>(idx),
+                              std::move(node));
+    }
+    push_history(history, history_idx, root);
+    design_root.set(std::move(root));
+    selected_key.set(new_key);
+  };
+
+  auto lib_item = [&](std::string type) -> ViewNode {
+    auto node = view("Box")
+                    .prop("padding", 10.0)
+                    .prop("bg", 0xFF151515)
+                    .prop("border", 0xFF2A2A2A)
+                    .prop("border_width", 1.0)
+                    .children({view("Text").prop("value", type).build()})
+                    .build();
+
+    node = DragGesture(
+        std::move(node), "editor:lib:" + type,
+        [drag_active, drag_type, drag_x, drag_y, insert_show, insert_mode, insert_axis,
+         insert_fx, insert_fy, insert_fw, insert_fh, design_root, type](DragGestureValue v) mutable {
+          drag_active.set(true);
+          drag_type.set(type);
+          drag_x.set(static_cast<double>(v.x));
+          drag_y.set(static_cast<double>(v.y));
+          auto plan = compute_insert_plan(design_root.get(), v.x, v.y);
+          insert_show.set(plan.valid);
+          insert_mode.set(plan.where);
+          insert_axis.set(plan.axis);
+          insert_fx.set(static_cast<double>(plan.container_frame.x));
+          insert_fy.set(static_cast<double>(plan.container_frame.y));
+          insert_fw.set(static_cast<double>(plan.container_frame.w));
+          insert_fh.set(static_cast<double>(plan.container_frame.h));
+        },
+        [drag_active, drag_type, drag_x, drag_y, insert_show, insert_mode, insert_axis,
+         insert_fx, insert_fy, insert_fw, insert_fh, add_node, design_root, type](DragGestureValue v) mutable {
+          drag_active.set(false);
+          drag_type.set("");
+          drag_x.set(static_cast<double>(v.x));
+          drag_y.set(static_cast<double>(v.y));
+          auto plan = compute_insert_plan(design_root.get(), v.x, v.y);
+          add_node(type, std::move(plan));
+          insert_show.set(false);
+          insert_mode.set("");
+          insert_axis.set("");
+          insert_fx.set(0.0);
+          insert_fy.set(0.0);
+          insert_fw.set(0.0);
+          insert_fh.set(0.0);
+        },
+        4.0f);
+    return node;
+  };
+
+  auto root = design_root.get();
+
+  auto tree_list = view("Column")
+                       .prop("spacing", 6.0)
+                       .prop("cross_align", "start")
+                       .children([&](auto &c) {
+                         auto add_tree = [&](auto &&self, const ViewNode &n, int depth) -> void {
+                           if (n.key.empty()) {
+                             for (const auto &ch : n.children) {
+                               self(self, ch, depth);
+                             }
+                             return;
+                           }
+                           std::string label;
+                           label.reserve(static_cast<std::size_t>(depth * 2 + 64));
+                           for (int i = 0; i < depth; ++i) {
+                             label += "  ";
+                           }
+                           label += n.type;
+                           const bool is_sel = (n.key == selected_key.get());
+                           auto row =
+                               view("Text")
+                                   .prop("value", label)
+                                   .prop("font_size", 13.0)
+                                   .prop("color", is_sel ? 0xFF80A0FF : 0xFFE0E0E0)
+                                   .build();
+                           row = onTapGesture(std::move(row),
+                                              [selected_key, k = n.key]() mutable {
+                                                selected_key.set(k);
+                                              });
+                           c.add(std::move(row));
+                           for (const auto &ch : n.children) {
+                             self(self, ch, depth + 1);
+                           }
+                         };
+                         if (!root.type.empty()) {
+                           add_tree(add_tree, root, 0);
+                         }
+                       })
+                       .build();
+
   return view("ScrollView")
       .prop("clip", true)
       .prop("default_width", 260.0)
       .prop("default_height", 600.0)
       .children({
           view("Column")
-              .prop("spacing", 8.0)
-              .prop("cross_align", "start")
+              .prop("spacing", 10.0)
+              .prop("cross_align", "stretch")
               .children({
-                  view("Text").prop("value", "App").prop("font_size", 13.0).build(),
-                  view("Text").prop("value", "  Button").prop("font_size", 13.0).build(),
-                  view("Text").prop("value", "  Text").prop("font_size", 13.0).build(),
-                  view("Text").prop("value", "  Input").prop("font_size", 13.0).build(),
-                  view("Text").prop("value", "  Card").prop("font_size", 13.0).build(),
-                  view("Text").prop("value", "  Modal").prop("font_size", 13.0).build(),
+                  view("Text").prop("value", "Library").prop("font_size", 12.0).prop("color", 0xFFB0B0B0).build(),
+                  view("Column")
+                      .prop("spacing", 8.0)
+                      .prop("cross_align", "stretch")
+                      .children({
+                          lib_item("Button"),
+                          lib_item("Text"),
+                          lib_item("TextField"),
+                          lib_item("Image"),
+                          lib_item("Column"),
+                          lib_item("Row"),
+                          lib_item("Box"),
+                      })
+                      .build(),
+                  view("Divider").prop("thickness", 1.0).prop("color", 0xFF2A2A2A).build(),
+                  view("Text").prop("value", "Tree").prop("font_size", 12.0).prop("color", 0xFFB0B0B0).build(),
+                  std::move(tree_list),
               })
               .build(),
       })
@@ -303,6 +724,249 @@ inline std::string format_prop_value(const Props &props, std::string_view k) {
     return *b ? "true" : "false";
   }
   return {};
+}
+
+inline ViewNode props_panel(StateHandle<ViewNode> design_root,
+                            StateHandle<std::string> selected_key,
+                            StateHandle<std::vector<ViewNode>> history,
+                            StateHandle<std::int64_t> history_idx) {
+  enum class Kind { Str, Num, Color, Bool };
+  struct Item {
+    const char *label;
+    const char *key;
+    Kind kind;
+  };
+
+  static const Item items[] = {
+      {"title", "title", Kind::Str},
+      {"value", "value", Kind::Str},
+      {"placeholder", "placeholder", Kind::Str},
+      {"variant", "variant", Kind::Str},
+      {"cross_align", "cross_align", Kind::Str},
+      {"padding", "padding", Kind::Num},
+      {"spacing", "spacing", Kind::Num},
+      {"width", "width", Kind::Num},
+      {"height", "height", Kind::Num},
+      {"font_size", "font_size", Kind::Num},
+      {"opacity", "opacity", Kind::Num},
+      {"bg", "bg", Kind::Color},
+      {"border", "border", Kind::Color},
+      {"border_width", "border_width", Kind::Num},
+      {"clip", "clip", Kind::Bool},
+  };
+
+  auto props_last_key = local_state<std::string>("editor:props_last_key", "");
+  auto selected = selected_key.get();
+  const auto root = design_root.get();
+  const auto *sel_node = find_node_by_key(root, selected);
+
+  std::vector<StateHandle<std::string>> field_states;
+  field_states.reserve(std::size(items));
+  for (const auto &it : items) {
+    field_states.push_back(
+        local_state<std::string>(std::string{"editor:prop:"} + it.key, ""));
+  }
+
+  auto stringify = [&](const PropValue &v, Kind k) -> std::string {
+    if (const auto *s = std::get_if<std::string>(&v)) {
+      return *s;
+    }
+    if (const auto *b = std::get_if<bool>(&v)) {
+      return *b ? "true" : "false";
+    }
+    if (const auto *d = std::get_if<double>(&v)) {
+      char buf[64]{};
+      std::snprintf(buf, sizeof(buf), "%.3f", *d);
+      return std::string{buf};
+    }
+    if (const auto *i = std::get_if<std::int64_t>(&v)) {
+      if (k == Kind::Color) {
+        char buf[64]{};
+        std::snprintf(buf, sizeof(buf), "0x%llX",
+                      static_cast<unsigned long long>(*i));
+        return std::string{buf};
+      }
+      return std::to_string(static_cast<long long>(*i));
+    }
+    return {};
+  };
+
+  if (props_last_key.get() != selected) {
+    for (std::size_t i = 0; i < std::size(items); ++i) {
+      const auto &it = items[i];
+      std::string v;
+      if (sel_node) {
+        if (const auto prop_it = sel_node->props.find(std::string{it.key});
+            prop_it != sel_node->props.end()) {
+          v = stringify(prop_it->second, it.kind);
+        }
+      }
+      field_states[i].set(std::move(v));
+    }
+    props_last_key.set(selected);
+  }
+
+  const auto idx = history_idx.get();
+  const auto hist = history.get();
+  const bool can_undo = idx > 0;
+  const bool can_redo = idx >= 0 && (idx + 1) < static_cast<std::int64_t>(hist.size());
+
+  auto apply = [design_root, selected_key, selected,
+                history, history_idx, field_states]() mutable {
+    auto root = design_root.get();
+    if (root.type.empty()) {
+      return;
+    }
+    auto *n = find_node_by_key_mut(root, selected);
+    if (!n) {
+      return;
+    }
+
+    auto parse_bool = [&](std::string_view s) -> std::optional<bool> {
+      if (s == "true" || s == "1") {
+        return true;
+      }
+      if (s == "false" || s == "0") {
+        return false;
+      }
+      return std::nullopt;
+    };
+
+    auto trim = [&](std::string &s) -> void {
+      while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) {
+        s.erase(s.begin());
+      }
+      while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) {
+        s.pop_back();
+      }
+    };
+
+    for (std::size_t i = 0; i < std::size(items); ++i) {
+      const auto &it = items[i];
+      auto s = field_states[i].get();
+      trim(s);
+      if (s.empty()) {
+        n->props.erase(std::string{it.key});
+        continue;
+      }
+      if (it.kind == Kind::Str) {
+        n->props.insert_or_assign(std::string{it.key}, PropValue{std::move(s)});
+        continue;
+      }
+      if (it.kind == Kind::Bool) {
+        if (auto b = parse_bool(s)) {
+          n->props.insert_or_assign(std::string{it.key}, PropValue{*b});
+        }
+        continue;
+      }
+      if (it.kind == Kind::Color) {
+        const char *begin = s.c_str();
+        int base = 10;
+        if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+          begin += 2;
+          base = 16;
+        } else if (!s.empty() && s[0] == '#') {
+          begin += 1;
+          base = 16;
+        }
+        char *end = nullptr;
+        const auto v = std::strtoll(begin, &end, base);
+        if (end && end != begin) {
+          n->props.insert_or_assign(std::string{it.key}, PropValue{static_cast<std::int64_t>(v)});
+        }
+        continue;
+      }
+
+      char *end = nullptr;
+      const auto v = std::strtod(s.c_str(), &end);
+      if (end && end != s.c_str()) {
+        n->props.insert_or_assign(std::string{it.key}, PropValue{static_cast<double>(v)});
+      }
+    }
+
+    push_history(history, history_idx, root);
+    design_root.set(std::move(root));
+    selected_key.set(selected);
+  };
+
+  auto undo = [history, history_idx, design_root](bool redo) mutable {
+    auto idx = history_idx.get();
+    auto h = history.get();
+    if (h.empty() || idx < 0 || idx >= static_cast<std::int64_t>(h.size())) {
+      return;
+    }
+    const auto next = redo ? (idx + 1) : (idx - 1);
+    if (next < 0 || next >= static_cast<std::int64_t>(h.size())) {
+      return;
+    }
+    history_idx.set(next);
+    design_root.set(h[static_cast<std::size_t>(next)]);
+  };
+
+  return view("ScrollView")
+      .prop("clip", true)
+      .prop("default_width", 360.0)
+      .prop("default_height", 600.0)
+      .children({
+          view("Column")
+              .prop("spacing", 10.0)
+              .prop("cross_align", "stretch")
+              .children([&](auto &c) {
+                c.add(view("Text")
+                          .prop("value", "Props")
+                          .prop("font_size", 12.0)
+                          .prop("color", 0xFFB0B0B0)
+                          .build());
+
+                std::string header = selected.empty() ? std::string{"(none)"} : selected;
+                if (sel_node) {
+                  header = sel_node->type + "  " + header;
+                }
+                c.add(view("Text")
+                          .prop("value", header)
+                          .prop("font_size", 13.0)
+                          .prop("color", 0xFFE0E0E0)
+                          .build());
+
+                c.add(view("Row")
+                          .prop("spacing", 8.0)
+                          .prop("cross_align", "center")
+                          .children({
+                              view("Button")
+                                  .prop("title", "Undo")
+                                  .prop("disabled", !can_undo)
+                                  .event("pointer_up", on_pointer_up([undo]() mutable { undo(false); }))
+                                  .build(),
+                              view("Button")
+                                  .prop("title", "Redo")
+                                  .prop("disabled", !can_redo)
+                                  .event("pointer_up", on_pointer_up([undo]() mutable { undo(true); }))
+                                  .build(),
+                              view("Spacer").build(),
+                              view("Button")
+                                  .prop("title", "Apply")
+                                  .prop("variant", "primary")
+                                  .event("pointer_up", on_pointer_up([apply]() mutable { apply(); }))
+                                  .build(),
+                          })
+                          .build());
+
+                c.add(view("Divider").prop("thickness", 1.0).prop("color", 0xFF2A2A2A).build());
+
+                for (std::size_t i = 0; i < std::size(items); ++i) {
+                  const auto &it = items[i];
+                  c.add(view("Text")
+                            .prop("value", it.label)
+                            .prop("font_size", 12.0)
+                            .prop("color", 0xFFB0B0B0)
+                            .build());
+                  c.add(TextField(field_states[i], std::string{"editor:prop_field:"} + it.key,
+                                  std::string{"("} + it.key + ")"));
+                }
+              })
+              .build(),
+      })
+      .build();
 }
 
 inline std::string style_src_for(const Props &props, std::string_view k) {
@@ -828,6 +1492,14 @@ border = 0xFFFFFF00
     const float preview_h = std::max(120.0f, workspace_h * 0.55f);
     const float edit_h = std::max(120.0f, workspace_h - preview_h - spacing);
 
+  #if defined(DUOROU_HAS_MINISWIFT)
+    auto editor_source = local_state<std::string>(
+        "editor:source",
+        "let root = VStack()\\n"
+        "root.addChild(Text(\\\"Hello duorou\\\"))\\n"
+        "root.addChild(Button(\\\"Click\\\"))\\n"
+        "UIApplication.shared.setRootView(root)\\n");
+  #else
     auto editor_source = local_state<std::string>(
         "editor:source",
         "view(\"Column\")\n"
@@ -838,12 +1510,36 @@ border = 0xFFFFFF00
         "    view(\"Button\").prop(\"title\", \"Click\").build(),\n"
         "  })\n"
         "  .build();\n");
+  #endif
 
     auto preview_state = local_state<std::string>("editor:preview_state", "");
     auto preview_layout = local_state<std::int64_t>("editor:preview_layout", 0);
     auto preview_zoom = local_state<double>("editor:preview_zoom", 1.0);
+
+    auto design_root = local_state<ViewNode>(
+        "editor:design_root",
+        view("Column")
+            .key("design:root")
+            .prop("spacing", 12.0)
+            .prop("cross_align", "start")
+            .children({
+                view("Text").key("design:text1").prop("value", "Hello duorou").build(),
+                view("Button").key("design:btn1").prop("title", "Button").prop("variant", "primary").build(),
+            })
+            .build());
+
+    auto history = local_state<std::vector<ViewNode>>("editor:history", {});
+    auto history_idx = local_state<std::int64_t>("editor:history_idx", -1);
+    auto history_init = local_state<bool>("editor:history_init", false);
+    if (!history_init.get()) {
+      auto h = std::vector<ViewNode>{design_root.get()};
+      history.set(std::move(h));
+      history_idx.set(0);
+      history_init.set(true);
+    }
+
     auto selected_key =
-        local_state<std::string>("editor:selected_key", "preview:button");
+        local_state<std::string>("editor:selected_key", "design:root");
 
     auto dsl_engine = EnvironmentObject<::duorou::ui::dsl::Engine>("dsl.engine");
     auto dsl_enabled = local_state<bool>("editor:dsl_enabled", false);
@@ -876,9 +1572,41 @@ border = 0xFFFFFF00
           return root;
         }
       }
-      return preview_panel(demo_tex_handle, center_w, preview_h,
-                           static_cast<int>(preview_layout.get()),
-                           selected_key);
+      auto root = design_root.get();
+      if (root.type.empty()) {
+        root = view("Column").key("design:root").children({}).build();
+      }
+      const auto sel = selected_key.get();
+      auto decorate = [&](auto &&self, ViewNode n) -> ViewNode {
+        for (auto &ch : n.children) {
+          ch = self(self, std::move(ch));
+        }
+        if (starts_with(n.key, "design:")) {
+          const bool is_sel = (n.key == sel);
+          if (is_sel) {
+            n.props.insert_or_assign("border", PropValue{static_cast<std::int64_t>(0xFF80A0FF)});
+            n.props.insert_or_assign("border_width", PropValue{2.0});
+          }
+          n = onTapGesture(std::move(n), [selected_key, k = n.key]() mutable {
+            selected_key.set(k);
+          });
+        }
+        return n;
+      };
+      auto canvas_content = decorate(decorate, std::move(root));
+      auto canvas = view("Box")
+                        .key("editor:canvas")
+                        .prop("padding", 16.0)
+                        .prop("bg", 0xFF101010)
+                        .prop("border", 0xFF2A2A2A)
+                        .prop("border_width", 1.0)
+                        .children({std::move(canvas_content)})
+                        .build();
+      canvas = onTapGesture(std::move(canvas), [selected_key]() mutable {
+        selected_key.set("design:root");
+      });
+      (void)preview_layout;
+      return canvas;
     }();
     preview.props.insert_or_assign("render_scale", PropValue{preview_zoom.get()});
     auto zoom_root =
@@ -913,9 +1641,8 @@ border = 0xFFFFFF00
     if (style_mgr_ptr) {
       style_mgr_ptr->apply_to_tree(preview);
     }
-    const auto selected_key_s = selected_key.get();
-    const auto *selected_node = find_node_by_key(preview, selected_key_s);
-    auto style_panel_node = style_panel(selected_key_s, selected_node);
+    auto props_panel_node =
+        props_panel(design_root, selected_key, history, history_idx);
 
     auto theme_pop_open = local_state<bool>("editor:theme_pop_open", false);
     auto theme_pop_x = local_state<double>("editor:theme_pop_x", 0.0);
@@ -1373,9 +2100,12 @@ border = 0xFFFFFF00
             .prop("spacing", spacing)
             .prop("cross_align", "stretch")
             .children({
-                panel("Component Tree", tree_panel(), left_w),
+                panel("Components",
+                      tree_panel(demo_tex_handle, design_root, selected_key,
+                                 history, history_idx),
+                      left_w),
                 panel("Workspace", std::move(workspace), center_w),
-                panel("Style", std::move(style_panel_node), right_w),
+                panel("Property", std::move(props_panel_node), right_w),
             })
             .build();
 
@@ -1387,8 +2117,115 @@ border = 0xFFFFFF00
             .children({std::move(top_bar), std::move(body)})
             .build();
 
+    auto drag_active = local_state<bool>("editor:lib_drag_active", false);
+    auto drag_type = local_state<std::string>("editor:lib_drag_type", "");
+    auto drag_x = local_state<double>("editor:lib_drag_x", 0.0);
+    auto drag_y = local_state<double>("editor:lib_drag_y", 0.0);
+    auto insert_show = local_state<bool>("editor:insert_show", false);
+    auto insert_mode = local_state<std::string>("editor:insert_mode", "");
+    auto insert_axis = local_state<std::string>("editor:insert_axis", "");
+    auto insert_fx = local_state<double>("editor:insert_fx", 0.0);
+    auto insert_fy = local_state<double>("editor:insert_fy", 0.0);
+    auto insert_fw = local_state<double>("editor:insert_fw", 0.0);
+    auto insert_fh = local_state<double>("editor:insert_fh", 0.0);
+
+    auto drag_ghost = [&]() -> ViewNode {
+      const float x = static_cast<float>(drag_x.get());
+      const float y = static_cast<float>(drag_y.get());
+      auto bubble =
+          view("Box")
+              .prop("padding", 10.0)
+              .prop("bg", 0xCC202020)
+              .prop("border", 0xFF3A3A3A)
+              .prop("border_width", 1.0)
+              .prop("hit_test", false)
+              .children({view("Text")
+                             .prop("value", drag_type.get().empty()
+                                               ? std::string{"(drag)"}
+                                               : drag_type.get())
+                             .prop("font_size", 12.0)
+                             .build()})
+              .build();
+      return view("Column")
+          .prop("hit_test", false)
+          .children([&](auto &c) {
+            c.add(view("Spacer").prop("height", y).prop("hit_test", false).build());
+            c.add(view("Row")
+                      .prop("hit_test", false)
+                      .children([&](auto &r) {
+                        r.add(view("Spacer").prop("width", x).prop("hit_test", false).build());
+                        r.add(std::move(bubble));
+                      })
+                      .build());
+          })
+          .build();
+    };
+
+    auto insert_indicator = [&]() -> ViewNode {
+      if (!insert_show.get()) {
+        return view("Spacer").prop("hit_test", false).build();
+      }
+
+      const auto mode = insert_mode.get();
+      const auto axis = insert_axis.get();
+      const float fx = static_cast<float>(insert_fx.get());
+      const float fy = static_cast<float>(insert_fy.get());
+      const float fw = static_cast<float>(insert_fw.get());
+      const float fh = static_cast<float>(insert_fh.get());
+      if (mode.empty() || fw <= 0.0f || fh <= 0.0f) {
+        return view("Spacer").prop("hit_test", false).build();
+      }
+
+      const RectF r{fx, fy, fw, fh};
+      const bool h = (axis == "h");
+      const bool before = (mode == "before");
+      const ColorU8 stroke{128, 160, 255, 255};
+      const ColorU8 fill{128, 160, 255, 40};
+      const float t = 2.0f;
+      const float cap = 6.0f;
+
+      auto node = Canvas(
+          "editor:insert_indicator",
+          [r, h, before, mode, stroke, fill, t, cap](RectF, std::vector<RenderOp> &out) {
+            if (mode == "inside") {
+              out.push_back(DrawRect{RectF{r.x, r.y, r.w, r.h}, fill});
+              out.push_back(DrawRect{RectF{r.x, r.y, r.w, t}, stroke});
+              out.push_back(DrawRect{RectF{r.x, r.y + r.h - t, r.w, t}, stroke});
+              out.push_back(DrawRect{RectF{r.x, r.y, t, r.h}, stroke});
+              out.push_back(DrawRect{RectF{r.x + r.w - t, r.y, t, r.h}, stroke});
+              return;
+            }
+
+            if (h) {
+              const float x = before ? r.x : (r.x + r.w);
+              out.push_back(DrawRect{RectF{x - t * 0.5f, r.y, t, r.h}, stroke});
+              out.push_back(DrawRect{RectF{x - cap * 0.5f, r.y, cap, cap}, stroke});
+              out.push_back(
+                  DrawRect{RectF{x - cap * 0.5f, r.y + r.h - cap, cap, cap}, stroke});
+            } else {
+              const float y = before ? r.y : (r.y + r.h);
+              out.push_back(DrawRect{RectF{r.x, y - t * 0.5f, r.w, t}, stroke});
+              out.push_back(DrawRect{RectF{r.x, y - cap * 0.5f, cap, cap}, stroke});
+              out.push_back(
+                  DrawRect{RectF{r.x + r.w - cap, y - cap * 0.5f, cap, cap}, stroke});
+            }
+          },
+          viewport_w, viewport_h);
+      node.props.insert_or_assign("hit_test", PropValue{false});
+      return node;
+    };
+
     if (!theme_pop_open.get()) {
-      return main;
+      if (!drag_active.get() && !insert_show.get()) {
+        return main;
+      }
+      return view("Overlay")
+          .children([&](auto &c) {
+            c.add(std::move(main));
+            c.add(insert_indicator());
+            c.add(drag_ghost());
+          })
+          .build();
     }
 
     const auto close_id =
@@ -1529,7 +2366,11 @@ border = 0xFFFFFF00
     return view("Overlay")
         .children([&](auto &c) {
           c.add(std::move(main));
+          c.add(insert_indicator());
           c.add(std::move(pop));
+          if (drag_active.get()) {
+            c.add(drag_ghost());
+          }
         })
         .build();
   });
