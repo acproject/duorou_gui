@@ -144,6 +144,540 @@ public:
   void notify() { notify_changed(); }
 };
 
+namespace dsl {
+struct UiEvalResult {
+  ViewNode root;
+  std::string error;
+  bool ok{};
+};
+
+class Engine : public ObservableObject {
+public:
+  virtual ~Engine() = default;
+  virtual UiEvalResult eval_ui(std::string_view code) = 0;
+};
+
+class MiniSwiftEngine final : public Engine {
+public:
+  UiEvalResult eval_ui(std::string_view code) override {
+    Parser p{code};
+    auto r = p.parse_program();
+    if (!r.ok) {
+      return UiEvalResult{ViewNode{}, std::move(r.error), false};
+    }
+    return UiEvalResult{std::move(r.node), {}, true};
+  }
+
+private:
+  struct ParseResult {
+    ViewNode node;
+    std::string error;
+    bool ok{};
+  };
+
+  enum class TokKind {
+    Identifier,
+    String,
+    Number,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Dot,
+    Comma,
+    Semicolon,
+    End,
+    Invalid,
+  };
+
+  struct Token {
+    TokKind kind{TokKind::Invalid};
+    std::string text;
+  };
+
+  class Lexer {
+  public:
+    explicit Lexer(std::string_view src) : src_{src} {}
+
+    Token next() {
+      skip_ws();
+      if (pos_ >= src_.size()) {
+        return Token{TokKind::End, {}};
+      }
+
+      const char ch = src_[pos_];
+      switch (ch) {
+      case '(':
+        ++pos_;
+        return Token{TokKind::LParen, "("};
+      case ')':
+        ++pos_;
+        return Token{TokKind::RParen, ")"};
+      case '{':
+        ++pos_;
+        return Token{TokKind::LBrace, "{"};
+      case '}':
+        ++pos_;
+        return Token{TokKind::RBrace, "}"};
+      case '.':
+        ++pos_;
+        return Token{TokKind::Dot, "."};
+      case ',':
+        ++pos_;
+        return Token{TokKind::Comma, ","};
+      case ';':
+        ++pos_;
+        return Token{TokKind::Semicolon, ";"};
+      case '"':
+        return lex_string();
+      default:
+        break;
+      }
+
+      if (is_ident_start(ch)) {
+        return lex_ident();
+      }
+      if (ch == '-' || is_digit(ch)) {
+        return lex_number();
+      }
+
+      ++pos_;
+      return Token{TokKind::Invalid, std::string{ch}};
+    }
+
+  private:
+    void skip_ws() {
+      while (pos_ < src_.size()) {
+        const char ch = src_[pos_];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+          ++pos_;
+          continue;
+        }
+        break;
+      }
+    }
+
+    static bool is_digit(char ch) { return ch >= '0' && ch <= '9'; }
+
+    static bool is_ident_start(char ch) {
+      return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+             (ch == '_');
+    }
+
+    static bool is_ident_cont(char ch) { return is_ident_start(ch) || is_digit(ch); }
+
+    Token lex_ident() {
+      const std::size_t start = pos_;
+      while (pos_ < src_.size() && is_ident_cont(src_[pos_])) {
+        ++pos_;
+      }
+      return Token{TokKind::Identifier,
+                   std::string{src_.substr(start, pos_ - start)}};
+    }
+
+    Token lex_number() {
+      const std::size_t start = pos_;
+      if (src_[pos_] == '-') {
+        ++pos_;
+      }
+      if (pos_ + 1 < src_.size() && src_[pos_] == '0' &&
+          (src_[pos_ + 1] == 'x' || src_[pos_ + 1] == 'X')) {
+        pos_ += 2;
+        while (pos_ < src_.size()) {
+          const char ch = src_[pos_];
+          const bool is_hex = (ch >= '0' && ch <= '9') ||
+                              (ch >= 'a' && ch <= 'f') ||
+                              (ch >= 'A' && ch <= 'F');
+          if (!is_hex) {
+            break;
+          }
+          ++pos_;
+        }
+        return Token{TokKind::Number,
+                     std::string{src_.substr(start, pos_ - start)}};
+      }
+
+      bool seen_dot = false;
+      while (pos_ < src_.size()) {
+        const char ch = src_[pos_];
+        if (is_digit(ch)) {
+          ++pos_;
+          continue;
+        }
+        if (ch == '.' && !seen_dot) {
+          seen_dot = true;
+          ++pos_;
+          continue;
+        }
+        if ((ch == 'e' || ch == 'E') && pos_ + 1 < src_.size()) {
+          ++pos_;
+          if (src_[pos_] == '+' || src_[pos_] == '-') {
+            ++pos_;
+          }
+          while (pos_ < src_.size() && is_digit(src_[pos_])) {
+            ++pos_;
+          }
+          break;
+        }
+        break;
+      }
+      return Token{TokKind::Number, std::string{src_.substr(start, pos_ - start)}};
+    }
+
+    Token lex_string() {
+      if (src_[pos_] != '"') {
+        return Token{TokKind::Invalid, {}};
+      }
+      ++pos_;
+      std::string out;
+      while (pos_ < src_.size()) {
+        const char ch = src_[pos_++];
+        if (ch == '"') {
+          return Token{TokKind::String, std::move(out)};
+        }
+        if (ch == '\\' && pos_ < src_.size()) {
+          const char esc = src_[pos_++];
+          switch (esc) {
+          case '"':
+            out.push_back('"');
+            break;
+          case '\\':
+            out.push_back('\\');
+            break;
+          case 'n':
+            out.push_back('\n');
+            break;
+          case 'r':
+            out.push_back('\r');
+            break;
+          case 't':
+            out.push_back('\t');
+            break;
+          default:
+            out.push_back(esc);
+            break;
+          }
+          continue;
+        }
+        out.push_back(ch);
+      }
+      return Token{TokKind::Invalid, "unterminated string"};
+    }
+
+    std::string_view src_;
+    std::size_t pos_{0};
+  };
+
+  class Parser {
+  public:
+    explicit Parser(std::string_view src) : lex_{src} { advance(); }
+
+    ParseResult parse_program() {
+      auto r = parse_view_expr();
+      if (!r.ok) {
+        return r;
+      }
+      accept(TokKind::Semicolon);
+      if (cur_.kind != TokKind::End) {
+        return fail("unexpected trailing tokens");
+      }
+      return r;
+    }
+
+  private:
+    ParseResult parse_view_expr() {
+      if (!expect_ident("view")) {
+        return fail("expected 'view'");
+      }
+      if (!expect(TokKind::LParen)) {
+        return fail("expected '(' after view");
+      }
+      const auto type = parse_string();
+      if (!type.ok) {
+        return fail(type.error);
+      }
+      if (!expect(TokKind::RParen)) {
+        return fail("expected ')' after view type");
+      }
+
+      ViewBuilder b{type.value};
+      bool built = false;
+
+      while (accept(TokKind::Dot)) {
+        const auto method = parse_ident();
+        if (!method.ok) {
+          return fail(method.error);
+        }
+
+        if (!expect(TokKind::LParen)) {
+          return fail("expected '(' after method");
+        }
+
+        if (method.value == "key") {
+          const auto k = parse_string();
+          if (!k.ok) {
+            return fail(k.error);
+          }
+          if (!expect(TokKind::RParen)) {
+            return fail("expected ')'");
+          }
+          b.key(std::move(k.value));
+          continue;
+        }
+
+        if (method.value == "prop") {
+          const auto key = parse_string();
+          if (!key.ok) {
+            return fail(key.error);
+          }
+          if (!expect(TokKind::Comma)) {
+            return fail("expected ',' in prop");
+          }
+          auto v = parse_value();
+          if (!v.ok) {
+            return fail(v.error);
+          }
+          if (!expect(TokKind::RParen)) {
+            return fail("expected ')'");
+          }
+          apply_prop(b, std::move(key.value), std::move(v.value));
+          continue;
+        }
+
+        if (method.value == "children") {
+          if (!expect(TokKind::LBrace)) {
+            return fail("expected '{' in children");
+          }
+          std::vector<ViewNode> kids;
+          if (!accept(TokKind::RBrace)) {
+            while (true) {
+              auto child = parse_view_expr();
+              if (!child.ok) {
+                return child;
+              }
+              kids.push_back(std::move(child.node));
+              if (accept(TokKind::Comma)) {
+                if (accept(TokKind::RBrace)) {
+                  break;
+                }
+                continue;
+              }
+              if (accept(TokKind::RBrace)) {
+                break;
+              }
+              return fail("expected ',' or '}' in children");
+            }
+          }
+          if (!expect(TokKind::RParen)) {
+            return fail("expected ')' after children");
+          }
+          b.children([&](auto &c) {
+            for (auto &n : kids) {
+              c.add(std::move(n));
+            }
+          });
+          continue;
+        }
+
+        if (method.value == "build") {
+          if (!expect(TokKind::RParen)) {
+            return fail("expected ')'");
+          }
+          built = true;
+          return ParseResult{std::move(b).build(), {}, true};
+        }
+
+        return fail("unknown method: " + method.value);
+      }
+
+      if (!built) {
+        return ParseResult{std::move(b).build(), {}, true};
+      }
+      return fail("build failed");
+    }
+
+    struct StringResult {
+      std::string value;
+      std::string error;
+      bool ok{};
+    };
+
+    struct IdentResult {
+      std::string value;
+      std::string error;
+      bool ok{};
+    };
+
+    struct ValueResult {
+      PropValue value;
+      std::string error;
+      bool ok{};
+    };
+
+    void advance() { cur_ = lex_.next(); }
+
+    bool accept(TokKind k) {
+      if (cur_.kind == k) {
+        advance();
+        return true;
+      }
+      return false;
+    }
+
+    bool expect(TokKind k) {
+      if (!accept(k)) {
+        return false;
+      }
+      return true;
+    }
+
+    bool expect_ident(std::string_view v) {
+      if (cur_.kind != TokKind::Identifier || cur_.text != v) {
+        return false;
+      }
+      advance();
+      return true;
+    }
+
+    IdentResult parse_ident() {
+      if (cur_.kind != TokKind::Identifier) {
+        return IdentResult{{}, "expected identifier", false};
+      }
+      auto out = cur_.text;
+      advance();
+      return IdentResult{std::move(out), {}, true};
+    }
+
+    StringResult parse_string() {
+      if (cur_.kind != TokKind::String) {
+        return StringResult{{}, "expected string literal", false};
+      }
+      auto out = cur_.text;
+      advance();
+      return StringResult{std::move(out), {}, true};
+    }
+
+    static bool parse_i64(std::string_view s, std::int64_t &out) {
+      if (s.empty()) {
+        return false;
+      }
+      bool neg = false;
+      if (s.front() == '-') {
+        neg = true;
+        s.remove_prefix(1);
+      }
+      int base = 10;
+      if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        s.remove_prefix(2);
+      }
+      if (s.empty()) {
+        return false;
+      }
+      std::int64_t v = 0;
+      for (const char ch : s) {
+        int digit = -1;
+        if (ch >= '0' && ch <= '9') {
+          digit = ch - '0';
+        } else if (ch >= 'a' && ch <= 'f') {
+          digit = 10 + (ch - 'a');
+        } else if (ch >= 'A' && ch <= 'F') {
+          digit = 10 + (ch - 'A');
+        } else {
+          return false;
+        }
+        if (digit >= base) {
+          return false;
+        }
+        v = v * base + digit;
+      }
+      out = neg ? -v : v;
+      return true;
+    }
+
+    static bool parse_f64(std::string_view s, double &out) {
+      if (s.empty()) {
+        return false;
+      }
+      std::string tmp{s};
+      char *end = nullptr;
+      const double v = std::strtod(tmp.c_str(), &end);
+      if (!end || end == tmp.c_str() || *end != '\0') {
+        return false;
+      }
+      out = v;
+      return true;
+    }
+
+    ValueResult parse_value() {
+      if (cur_.kind == TokKind::String) {
+        auto s = cur_.text;
+        advance();
+        return ValueResult{PropValue{std::move(s)}, {}, true};
+      }
+      if (cur_.kind == TokKind::Identifier) {
+        if (cur_.text == "true") {
+          advance();
+          return ValueResult{PropValue{true}, {}, true};
+        }
+        if (cur_.text == "false") {
+          advance();
+          return ValueResult{PropValue{false}, {}, true};
+        }
+        return ValueResult{{}, "unexpected identifier: " + cur_.text, false};
+      }
+      if (cur_.kind == TokKind::Number) {
+        const std::string s = cur_.text;
+        advance();
+        if (s.find('.') != std::string::npos || s.find('e') != std::string::npos ||
+            s.find('E') != std::string::npos) {
+          double v = 0.0;
+          if (!parse_f64(s, v)) {
+            return ValueResult{{}, "invalid number: " + s, false};
+          }
+          return ValueResult{PropValue{v}, {}, true};
+        }
+        std::int64_t v = 0;
+        if (!parse_i64(s, v)) {
+          double dv = 0.0;
+          if (parse_f64(s, dv)) {
+            return ValueResult{PropValue{dv}, {}, true};
+          }
+          return ValueResult{{}, "invalid integer: " + s, false};
+        }
+        return ValueResult{PropValue{v}, {}, true};
+      }
+      return ValueResult{{}, "expected value", false};
+    }
+
+    static void apply_prop(ViewBuilder &b, std::string key, PropValue v) {
+      if (const auto *s = std::get_if<std::string>(&v)) {
+        b.prop(std::move(key), *s);
+        return;
+      }
+      if (const auto *i = std::get_if<std::int64_t>(&v)) {
+        b.prop(std::move(key), *i);
+        return;
+      }
+      if (const auto *d = std::get_if<double>(&v)) {
+        b.prop(std::move(key), *d);
+        return;
+      }
+      if (const auto *bo = std::get_if<bool>(&v)) {
+        b.prop(std::move(key), *bo);
+        return;
+      }
+    }
+
+    ParseResult fail(std::string msg) { return ParseResult{ViewNode{}, std::move(msg), false}; }
+
+    Lexer lex_;
+    Token cur_{};
+  };
+};
+} // namespace dsl
+
+
 inline void Subscription::reset() {
   if (!state_ || id_ == 0) {
     return;

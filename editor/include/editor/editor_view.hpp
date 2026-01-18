@@ -808,6 +808,13 @@ border = 0xFFFFFF00
       provide_environment_object("style.manager", style_mgr_ptr);
     }
 
+    auto dsl_engine_state =
+        StateObject<::duorou::ui::dsl::MiniSwiftEngine>("editor:dsl_engine");
+    auto dsl_engine_ptr = dsl_engine_state.get();
+    if (dsl_engine_ptr) {
+      provide_environment_object("dsl.engine", dsl_engine_ptr);
+    }
+
     const float viewport_w = std::max(320.0f, size.w);
     const float viewport_h = std::max(240.0f, size.h);
     constexpr float left_w = 260.0f;
@@ -837,9 +844,42 @@ border = 0xFFFFFF00
     auto preview_zoom = local_state<double>("editor:preview_zoom", 1.0);
     auto selected_key =
         local_state<std::string>("editor:selected_key", "preview:button");
-    auto preview = preview_panel(demo_tex_handle, center_w, preview_h,
-                                 static_cast<int>(preview_layout.get()),
-                                 selected_key);
+
+    auto dsl_engine = EnvironmentObject<::duorou::ui::dsl::Engine>("dsl.engine");
+    auto dsl_enabled = local_state<bool>("editor:dsl_enabled", false);
+    auto dsl_last_ok = local_state<bool>("editor:dsl_last_ok", false);
+    auto dsl_error = local_state<std::string>("editor:dsl_error", "");
+    auto dsl_root = local_state<ViewNode>("editor:dsl_root", ViewNode{});
+
+    auto dsl_run = [dsl_engine, editor_source, dsl_root, dsl_last_ok,
+                    dsl_error]() mutable {
+      if (!dsl_engine.valid()) {
+        dsl_last_ok.set(false);
+        dsl_error.set("dsl engine missing");
+        return;
+      }
+      auto r = dsl_engine->eval_ui(editor_source.get());
+      if (!r.ok || r.root.type.empty()) {
+        dsl_last_ok.set(false);
+        dsl_error.set(r.error.empty() ? std::string{"eval failed"} : r.error);
+        return;
+      }
+      dsl_root.set(std::move(r.root));
+      dsl_last_ok.set(true);
+      dsl_error.set("");
+    };
+
+    auto preview = [&]() -> ViewNode {
+      if (dsl_enabled.get() && dsl_last_ok.get()) {
+        auto root = dsl_root.get();
+        if (!root.type.empty()) {
+          return root;
+        }
+      }
+      return preview_panel(demo_tex_handle, center_w, preview_h,
+                           static_cast<int>(preview_layout.get()),
+                           selected_key);
+    }();
     preview.props.insert_or_assign("render_scale", PropValue{preview_zoom.get()});
     auto zoom_root =
         view("Box")
@@ -1173,6 +1213,60 @@ border = 0xFFFFFF00
                                                   reload_hot_theme_auto();
                                                 },
                                                 false));
+                              }
+                            })
+                            .build(),
+                        view("Column")
+                            .prop("spacing", 8.0)
+                            .prop("cross_align", "stretch")
+                            .children([&](auto &c) {
+                              c.add(view("Row")
+                                        .prop("spacing", 8.0)
+                                        .prop("cross_align", "center")
+                                        .children([&](auto &r) {
+                                          r.add(view("Text")
+                                                    .prop("value", "DSL:")
+                                                    .prop("font_size", 12.0)
+                                                    .prop("color", 0xFFB0B0B0)
+                                                    .build());
+                                          r.add(view("Button")
+                                                    .prop("title",
+                                                          dsl_enabled.get()
+                                                              ? "Use DSL: ON"
+                                                              : "Use DSL: OFF")
+                                                    .event("pointer_up",
+                                                           on_pointer_up([dsl_enabled]() mutable {
+                                                             dsl_enabled.set(!dsl_enabled.get());
+                                                           }))
+                                                    .build());
+                                          r.add(view("Button")
+                                                    .prop("title", "Run DSL")
+                                                    .event("pointer_up",
+                                                           on_pointer_up([dsl_run]() mutable {
+                                                             dsl_run();
+                                                           }))
+                                                    .build());
+                                          r.add(view("Spacer").build());
+                                          r.add(view("Text")
+                                                    .prop("value",
+                                                          dsl_engine.valid()
+                                                              ? "Engine: OK"
+                                                              : "Engine: missing")
+                                                    .prop("font_size", 12.0)
+                                                    .prop("color",
+                                                          dsl_engine.valid()
+                                                              ? 0xFFB0B0B0
+                                                              : 0xFFFF8080)
+                                                    .build());
+                                        })
+                                        .build());
+                              const auto err = dsl_error.get();
+                              if (!err.empty()) {
+                                c.add(view("Text")
+                                          .prop("value", err)
+                                          .prop("font_size", 12.0)
+                                          .prop("color", 0xFFFF8080)
+                                          .build());
                               }
                             })
                             .build(),

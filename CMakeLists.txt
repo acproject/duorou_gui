@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(duorou_gui LANGUAGES CXX)
+project(duorou_gui LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(DUOROU_ENABLE_WEBVIEW "Enable WebView integration (placeholder by default)" OFF)
 option(DUOROU_ENABLE_FFMPEG "Enable FFmpeg integration (placeholder by default)" OFF)
+option(DUOROU_ENABLE_MINISWIFT "Enable MiniSwift DSL integration" ON)
+
+set(DUOROU_MINISWIFT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniswift")
+if(DUOROU_ENABLE_MINISWIFT AND EXISTS "${DUOROU_MINISWIFT_DIR}/CMakeLists.txt")
+  add_subdirectory("${DUOROU_MINISWIFT_DIR}" third_party/miniswift_build)
+  set(DUOROU_HAS_MINISWIFT 1)
+endif()
 
 add_library(duorou_ui INTERFACE)
 target_include_directories(duorou_ui INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

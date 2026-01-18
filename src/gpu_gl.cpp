@@ -1541,9 +1541,13 @@ int main(int argc, char **argv) {
   auto file_dialog_selected = state<std::string>(std::string{});
   auto file_dialog_result = state<std::string>(std::string{});
 
+  auto dsl_engine = std::shared_ptr<duorou::ui::dsl::Engine>{
+      std::make_shared<duorou::ui::dsl::MiniSwiftEngine>()};
+
   GLTextCache text_cache;
 
   ViewInstance app{[&]() {
+    provide_environment_object<duorou::ui::dsl::Engine>("dsl.engine", dsl_engine);
 #if defined(DUOROU_USE_EDITOR_VIEW)
     if (use_editor) {
       return duorou::ui::editor::editor_view(demo_tex_handle);
